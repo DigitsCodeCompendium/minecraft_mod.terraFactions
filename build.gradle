@@ -27,7 +27,20 @@ sourceSets.main.resources {
 }
 
 repositories {
-    // Add here additional repositories if required by some of the dependencies below.
+    mavenCentral()
+    maven {
+        name = 'TerraLibLocal'
+        url = uri('../minecraft_mod.terraLib/repo')
+    }
+    maven {
+        name = 'Modrinth'
+        url = 'https://api.modrinth.com/maven'
+        content { includeGroup 'maven.modrinth' }
+    }
+    maven {
+        name = 'JourneyMap'
+        url = 'https://maven.blamejared.com'
+    }
 }
 
 base {
@@ -56,6 +69,9 @@ neoForge {
             client()
             // Comma-separated list of namespaces to load gametests from. Empty = all namespaces.
             systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+            if (project.hasProperty('quickWorld')) {
+                programArguments.addAll '--quickPlaySingleplayer', project.property('quickWorld').toString()
+            }
         }
 
         server {
@@ -116,27 +132,23 @@ configurations {
 }
 
 dependencies {
-    // Example optional mod dependency with JEI
-    // The JEI API is declared for compile time use, while the full JEI artifact is used at runtime
-    // compileOnly "mezz.jei:jei-${mc_version}-common-api:${jei_version}"
-    // compileOnly "mezz.jei:jei-${mc_version}-neoforge-api:${jei_version}"
-    // We add the full version to localRuntime, not runtimeOnly, so that we do not publish a dependency on it
-    // localRuntime "mezz.jei:jei-${mc_version}-neoforge:${jei_version}"
+    testImplementation platform('org.junit:junit-bom:5.11.4')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    testImplementation "info.journeymap:journeymap-api-neoforge:${project.journeymap_api_version}"
 
-    // Example mod dependency using a mod jar from ./libs with a flat dir repository
-    // This maps to ./libs/coolmod-${mc_version}-${coolmod_version}.jar
-    // The group id is ignored when searching -- in this case, it is "blank"
-    // implementation "blank:coolmod-${mc_version}:${coolmod_version}"
+    compileOnly "info.journeymap:journeymap-api-neoforge:${project.journeymap_api_version}"
+    implementation "com.digitscodecompendium.terralib:terralib:${project.terralib_version}"
 
-    // Example mod dependency using a file as dependency
-    // implementation files("libs/coolmod-${mc_version}-${coolmod_version}.jar")
+    // Native NeoForge JourneyMap development runtime.
+    localRuntime "maven.modrinth:journeymap:${project.journeymap_version}"
+    localRuntime "info.journeymap:journeymap-api-neoforge:${project.journeymap_api_version}"
+    localRuntime "mysticdrew:common-networking-neoforge:${project.common_networking_version}"
 
-    // Example project dependency using a sister or child project:
-    // implementation project(":myproject")
+}
 
-    // For more info:
-    // http://www.gradle.org/docs/current/userguide/artifact_dependencies_tutorial.html
-    // http://www.gradle.org/docs/current/userguide/dependency_management.html
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
 }
 
 // This block of code expands all declared replace properties in the specified resource targets.
@@ -151,6 +163,7 @@ var generateModMetadata = tasks.register("generateModMetadata", ProcessResources
             mod_name               : mod_name,
             mod_license            : mod_license,
             mod_version            : mod_version,
+            terralib_version       : terralib_version,
     ]
     inputs.properties replaceProperties
     expand replaceProperties
@@ -179,6 +192,14 @@ publishing {
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8' // Use the UTF-8 charset for Java compilation
+}
+
+// IntelliJ's generated Application run references these argument files directly.
+// A clean removes them, while the IDE's normal pre-launch Make only compiles Java.
+// Regenerate the client launch inputs as part of that compile so the run remains
+// usable after `clean` without requiring a manual Gradle preparation step.
+tasks.named('compileJava') {
+    dependsOn tasks.named('prepareClientRun')
 }
 
 // IDEA no longer automatically downloads sources/javadoc jars for dependencies, so we need to explicitly enable the behavior.

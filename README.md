@@ -1,25 +1,108 @@
+# TerraFactions
 
-Installation information
-=======
+TerraFactions is a standalone factions mod for NeoForge 1.21.1. It owns its faction, member, relationship, power, and territory data per Minecraft save. The Fabric Factions mod and Sinytra Connector are not used.
 
-This template repository can be directly cloned to get you started with a new
-mod. Simply create a new repository cloned from this one, by following the
-instructions provided by [GitHub](https://docs.github.com/en/repositories/creating-and-managing-repositories/creating-a-repository-from-a-template).
+[JourneyMap](https://modrinth.com/mod/journeymap) integration is optional and uses its native NeoForge API.
 
-Once you have your clone, simply open the repository in the IDE of your choice. The usual recommendation for an IDE is either IntelliJ IDEA or Eclipse.
+## Factions
 
-If at any point you are missing libraries in your IDE, or you've run into problems you can
-run `gradlew --refresh-dependencies` to refresh the local cache. `gradlew clean` to reset everything 
-{this does not affect your code} and then start the process again.
+Create and manage factions with `/factions` (also available as `/tf` and `/terrafactions`):
 
-Mapping Names:
-============
-By default, the MDK is configured to use the official mapping names from Mojang for methods and fields 
-in the Minecraft codebase. These names are covered by a specific license. All modders should be aware of this
-license. For the latest license text, refer to the mapping file itself, or the reference copy here:
-https://github.com/NeoForged/NeoForm/blob/main/Mojang.md
+```text
+/factions create <name>
+/factions invite <player>
+/factions join <name>
+/factions leave
+/factions kick <player>
+/factions disband
+/factions rank <player> <leader|commander|member|guest|owner>
+/factions declare <ally|neutral|enemy> <faction>
+/factions info [faction]
+/factions list
+/factions power
+```
 
-Additional Resources: 
-==========
-Community Documentation: https://docs.neoforged.net/  
-NeoForged Discord: https://discord.neoforged.net/
+Faction owners begin at the configured maximum power. Maximum power is the configured base plus the configured amount per member. Player deaths reduce power and online members regenerate their attributed death loss over time. `/factions power` shows available power, claim usage, total death loss, and the players responsible for that loss. These values are configurable in each world's `serverconfig/terrafactions-server.toml`.
+
+## Capital, core, and border territory
+
+Every claimed chunk is exactly one of three types:
+
+- Capital is the faction's single first claim. It uses the core cost and protection rules.
+- Core costs 10 power by default. Outsiders cannot modify or use blocks, or interact with or attack non-player entities.
+- Border costs 1 power by default. Blocks remain protected, but outsiders can use containers and kill or interact with entities.
+
+Faction members except guests can build in their own territory. Mutual allies receive the same block permission. Explosions cannot destroy claimed blocks. Territory never blocks player-versus-player attacks, so PvP remains symmetric.
+
+```text
+/factions claim core
+/factions claim core <size>
+/factions claim border
+/factions claim border <size>
+/factions unclaim
+/factions convert core
+/factions convert border
+/factions overclaim core
+/factions overclaim border
+/factions liberate
+/factions capital set
+```
+
+New claims must share a cardinal edge with existing faction territory in that dimension, and voluntary unclaims cannot split it. A bulk size of 2 claims a centered 3x3 square, size 3 claims 5x5, and so on; the operation is all-or-nothing. The first claim becomes the faction capital. Leadership can move the capital only to a core chunk, which converts the old capital back to core. Move the capital before unclaiming or converting it.
+
+Border claims become vulnerable at or below 30% of maximum faction power by default. Core and capital become vulnerable at zero available power. `/factions info` shows the current secure/vulnerable status for core and border claims. Enemies can convert an adjacent vulnerable claim into either type with `overclaim`, or remove it with `liberate`.
+
+Claim costs reduce the faction's available power:
+
+```text
+available power = maximum power - death losses - capital/core costs - border costs
+```
+
+## Tags, chat, and radar
+
+Every faction automatically gets an uppercase tag from the first four letters or numbers in its name. Tags are at most four letters, numbers, or underscores. Factionless players show `[NF]`.
+
+```text
+/factions modify name <name>
+/factions modify description <description>
+/factions modify color <named color|RRGGBB>
+/factions modify tag <tag>
+/factions modify tag clear
+/factions settings chat <global|faction|focus>
+/factions settings radar [on|off]
+```
+
+Only the tag is relation-colored in chat and above a player's head: blue for your own faction, green for mutual allies, red for enemies, and gray for neutral or factionless players. Faction-channel lines are additionally prefixed with `[Faction]`. Leaving, being kicked, or disbanding automatically resets faction/focus chat to global. Faction-name arguments provide tab completion.
+
+Radar briefly displays a TerraLib-styled panel with `Capital`, `Core`, `Border`, or `Wilderness` and the owning faction when entering a different area, then disappears after about three seconds.
+
+## JourneyMap
+
+When JourneyMap for NeoForge is installed, adjacent claims of the same faction and type are merged into exterior polygons. Core uses a 38% fill and border uses an 18% fill. Only the capital carries the faction name label. Vulnerable areas flash between bright and dim red outlines once per second.
+
+The JourneyMap fullscreen UI has a **Factions: On/Off** button. The same preference can be changed with `/factions overlay on` and `/factions overlay off`.
+
+## Importing the old compatibility data
+
+Import is never automatic because the former Fabric Factions files were shared by every save. An operator can inspect what would be imported into the current world, then explicitly confirm it:
+
+```text
+/factions admin importlegacy preview
+/factions admin importlegacy confirm
+```
+
+The importer combines the shared legacy factions, users, and core claims with the current world's old TerraFactions border claims, capital, and tags. It refuses to run after the current world contains any native faction data.
+
+## Development
+
+Use JDK 21:
+
+```shell
+./gradlew runClient
+./gradlew test
+./gradlew build
+```
+
+To launch directly into a development save, use `./gradlew -PquickWorld="Save Name" runClient`.
+
+The generated IntelliJ client run uses `net.neoforged.devlaunch.Main`; Gradle supplies its VM and program argument files.

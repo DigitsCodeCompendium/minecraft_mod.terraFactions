@@ -1,0 +1,439 @@
+package dev.terrafactions.factions;
+
+import dev.terrafactions.factions.FactionSnapshot.CapitalSnapshot;
+import dev.terrafactions.factions.FactionSnapshot.ClaimSnapshot;
+import dev.terrafactions.factions.NativeFactionData.FactionRecord;
+import dev.terrafactions.factions.NativeFactionData.MemberRecord;
+import dev.terrafactions.factions.NativeFactionData.PlayerSettings;
+import dev.terrafactions.territory.TerraFactionsConfig;
+import dev.terrafactions.territory.TerritoryClaim;
+import dev.terrafactions.territory.TerritoryKey;
+import dev.terrafactions.territory.TerritoryType;
+import net.minecraft.server.MinecraftServer;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+
+import dev.terrafactions.factions.LegacyFactionImporter.LegacyImport;
+
+/** Native NeoForge faction authority. No Fabric or Connector types cross this boundary. */
+public final class NativeFactionService {
+    private NativeFactionData data;
+
+    public void initialize(MinecraftServer server) {
+        data = server.overworld().getDataStorage().computeIfAbsent(
+                NativeFactionData.factory(), NativeFactionData.DATA_NAME);
+    }
+
+    public void stop() {
+        data = null;
+    }
+
+    public boolean isReady() {
+        return data != null;
+    }
+
+    public boolean isEmpty() {
+        NativeFactionData state = requireData();
+        return state.factions.isEmpty() && state.members.isEmpty() && state.claims.isEmpty();
+    }
+
+    public void importLegacy(LegacyImport legacy) {
+        NativeFactionData state = requireData();
+        if (!isEmpty()) throw new IllegalStateException("This world already contains native TerraFactions data");
+        for (var imported : legacy.factions()) {
+            FactionRecord faction = new FactionRecord(imported.id(), imported.name());
+            faction.description = imported.description();
+            faction.color = imported.color();
+            faction.power = imported.power();
+            faction.tag = imported.tag();
+            faction.capital = imported.capital();
+            faction.relations.putAll(imported.relations());
+            state.factions.put(faction.id, faction);
+        }
+        for (var imported : legacy.members()) {
+            if (state.factions.containsKey(imported.factionId())) {
+                state.members.putIfAbsent(imported.playerId(),
+                        new MemberRecord(imported.factionId(), imported.rank()));
+            }
+        }
+        for (TerritoryClaim claim : legacy.claims()) {
+            if (state.factions.containsKey(claim.factionId())) state.claims.putIfAbsent(claim.key(), claim);
+        }
+        legacy.settings().forEach((playerId, imported) -> state.settings.put(playerId,
+                new PlayerSettings(imported.radar(), imported.chatMode())));
+        state.audit();
+        for (FactionRecord faction : state.factions.values()) clampPower(faction.id);
+        state.setDirty();
+    }
+
+    public List<FactionSnapshot> allFactions() {
+        NativeFactionData state = requireData();
+        return state.factionRecords().stream()
+                .sorted(Comparator.comparing(faction -> faction.name.toLowerCase(Locale.ROOT)))
+                .map(this::snapshot)
+                .toList();
+    }
+
+    public FactionSnapshot snapshot(UUID factionId) {
+        FactionRecord faction = requireData().factions.get(factionId);
+        return faction == null ? null : snapshot(faction);
+    }
+
+    private FactionSnapshot snapshot(FactionRecord faction) {
+        List<ClaimSnapshot> claims = requireData().claims.values().stream()
+                .filter(claim -> claim.factionId().equals(faction.id))
+                .map(claim -> new ClaimSnapshot(claim.key().x(), claim.key().z(),
+                        claim.key().dimension(), claim.type()))
+                .toList();
+        CapitalSnapshot capital = faction.capital == null ? null
+                : new CapitalSnapshot(faction.capital.x(), faction.capital.z(), faction.capital.dimension());
+        return new FactionSnapshot(faction.id, faction.name, faction.description, faction.color,
+                claims, capital);
+    }
+
+    public FactionIdentity factionForPlayer(UUID playerId) {
+        MemberRecord member = requireData().members.get(playerId);
+        return member == null ? null : new FactionIdentity(member.factionId, member.rank);
+    }
+
+    public FactionPower power(UUID factionId) {
+        FactionRecord faction = requireData().factions.get(factionId);
+        if (faction == null) return null;
+        int maximum = maximumPower(factionId);
+        int claimUsage = claimUsage(factionId);
+        int deathLoss = Math.max(0, maximum - faction.power);
+        long available = (long) faction.power - claimUsage;
+        return new FactionPower((int) Math.max(Integer.MIN_VALUE, available), maximum,
+                claimUsage, deathLoss, faction.deathLosses);
+    }
+
+    public int claimUsage(UUID factionId) {
+        long usage = requireData().claims.values().stream()
+                .filter(claim -> claim.factionId().equals(factionId))
+                .mapToLong(claim -> claim.type().cost()).sum();
+        return (int) Math.min(Integer.MAX_VALUE, usage);
+    }
+
+    public int maximumPower(UUID factionId) {
+        long members = requireData().members.values().stream()
+                .filter(member -> member.factionId.equals(factionId)).count();
+        long maximum = TerraFactionsConfig.BASE_POWER.get()
+                + members * (long) TerraFactionsConfig.POWER_PER_MEMBER.get();
+        return (int) Math.min(Integer.MAX_VALUE, maximum);
+    }
+
+    public FactionDisplay factionDisplay(UUID factionId) {
+        FactionRecord faction = requireData().factions.get(factionId);
+        return faction == null ? null : new FactionDisplay(faction.name, faction.color);
+    }
+
+    public String factionName(UUID factionId) {
+        FactionRecord faction = requireData().factions.get(factionId);
+        return faction == null ? null : faction.name;
+    }
+
+    public UUID factionByName(String name) {
+        return requireData().factionRecords().stream()
+                .filter(faction -> faction.name.equalsIgnoreCase(name))
+                .map(faction -> faction.id)
+                .findFirst().orElse(null);
+    }
+
+    public UUID createFaction(UUID ownerId, String name) {
+        NativeFactionData state = requireData();
+        if (state.members.containsKey(ownerId)) throw new IllegalStateException("Player is already in a faction");
+        if (factionByName(name) != null) throw new IllegalArgumentException("A faction with that name already exists");
+        UUID id = UUID.randomUUID();
+        FactionRecord faction = new FactionRecord(id, name);
+        state.factions.put(id, faction);
+        state.members.put(ownerId, new MemberRecord(id, FactionRank.OWNER));
+        faction.power = maximumPower(id);
+        state.setDirty();
+        return id;
+    }
+
+    public void disband(UUID factionId) {
+        NativeFactionData state = requireData();
+        if (state.factions.remove(factionId) == null) return;
+        List<UUID> formerMembers = state.members.entrySet().stream()
+                .filter(entry -> entry.getValue().factionId.equals(factionId))
+                .map(Map.Entry::getKey).toList();
+        state.members.entrySet().removeIf(entry -> entry.getValue().factionId.equals(factionId));
+        formerMembers.forEach(playerId -> settings(playerId).chatMode = FactionChatMode.GLOBAL);
+        state.claims.entrySet().removeIf(entry -> entry.getValue().factionId().equals(factionId));
+        for (FactionRecord faction : state.factions.values()) {
+            faction.relations.remove(factionId);
+        }
+        state.setDirty();
+    }
+
+    public void invite(UUID factionId, UUID playerId) {
+        FactionRecord faction = requireFaction(factionId);
+        faction.invites.add(playerId);
+        requireData().setDirty();
+    }
+
+    public boolean isInvited(UUID factionId, UUID playerId) {
+        return requireFaction(factionId).invites.contains(playerId);
+    }
+
+    public void join(UUID factionId, UUID playerId) {
+        NativeFactionData state = requireData();
+        if (state.members.containsKey(playerId)) throw new IllegalStateException("Player is already in a faction");
+        FactionRecord faction = requireFaction(factionId);
+        if (!faction.invites.remove(playerId)) throw new IllegalStateException("Player is not invited");
+        state.members.put(playerId, new MemberRecord(factionId, FactionRank.MEMBER));
+        faction.power = Math.min(maximumPower(factionId),
+                faction.power + TerraFactionsConfig.POWER_PER_MEMBER.get());
+        state.setDirty();
+    }
+
+    public void leave(UUID playerId) {
+        NativeFactionData state = requireData();
+        MemberRecord member = state.members.get(playerId);
+        if (member == null) return;
+        if (member.rank == FactionRank.OWNER) throw new IllegalStateException("The owner must transfer ownership or disband");
+        state.members.remove(playerId);
+        settings(playerId).chatMode = FactionChatMode.GLOBAL;
+        clampPower(member.factionId);
+        state.setDirty();
+    }
+
+    public void kick(UUID factionId, UUID playerId) {
+        NativeFactionData state = requireData();
+        MemberRecord member = state.members.get(playerId);
+        if (member == null || !member.factionId.equals(factionId)) throw new IllegalStateException("Player is not in that faction");
+        if (member.rank == FactionRank.OWNER) throw new IllegalStateException("The faction owner cannot be kicked");
+        state.members.remove(playerId);
+        settings(playerId).chatMode = FactionChatMode.GLOBAL;
+        clampPower(factionId);
+        state.setDirty();
+    }
+
+    public void setRank(UUID factionId, UUID playerId, FactionRank rank) {
+        MemberRecord member = requireData().members.get(playerId);
+        if (member == null || !member.factionId.equals(factionId)) throw new IllegalStateException("Player is not in that faction");
+        member.rank = Objects.requireNonNull(rank);
+        requireData().setDirty();
+    }
+
+    public void transferOwnership(UUID factionId, UUID currentOwnerId, UUID newOwnerId) {
+        NativeFactionData state = requireData();
+        MemberRecord currentOwner = state.members.get(currentOwnerId);
+        MemberRecord newOwner = state.members.get(newOwnerId);
+        if (currentOwner == null || !currentOwner.factionId.equals(factionId)
+                || currentOwner.rank != FactionRank.OWNER) {
+            throw new IllegalStateException("Only the current faction owner can transfer ownership");
+        }
+        if (newOwner == null || !newOwner.factionId.equals(factionId)) {
+            throw new IllegalStateException("The new owner must belong to the faction");
+        }
+        if (currentOwnerId.equals(newOwnerId)) {
+            throw new IllegalArgumentException("That player already owns the faction");
+        }
+        currentOwner.rank = FactionRank.LEADER;
+        newOwner.rank = FactionRank.OWNER;
+        state.setDirty();
+    }
+
+    public FactionRelation relation(UUID viewerFactionId, UUID otherFactionId) {
+        if (viewerFactionId == null || otherFactionId == null) return FactionRelation.NEUTRAL;
+        if (viewerFactionId.equals(otherFactionId)) return FactionRelation.ALLIED;
+        FactionRecord viewer = requireData().factions.get(viewerFactionId);
+        FactionRecord other = requireData().factions.get(otherFactionId);
+        if (viewer == null || other == null) return FactionRelation.NEUTRAL;
+        FactionRelation forward = viewer.relations.getOrDefault(otherFactionId, FactionRelation.NEUTRAL);
+        FactionRelation reverse = other.relations.getOrDefault(viewerFactionId, FactionRelation.NEUTRAL);
+        if (forward == FactionRelation.ENEMY || reverse == FactionRelation.ENEMY) return FactionRelation.ENEMY;
+        return forward == FactionRelation.ALLIED && reverse == FactionRelation.ALLIED
+                ? FactionRelation.ALLIED : FactionRelation.NEUTRAL;
+    }
+
+    public boolean isEnemy(UUID firstFactionId, UUID secondFactionId) {
+        return relation(firstFactionId, secondFactionId) == FactionRelation.ENEMY;
+    }
+
+    public void setRelation(UUID factionId, UUID targetId, FactionRelation relation) {
+        if (factionId.equals(targetId)) throw new IllegalArgumentException("A faction cannot target itself");
+        FactionRecord faction = requireFaction(factionId);
+        requireFaction(targetId);
+        if (relation == FactionRelation.NEUTRAL) faction.relations.remove(targetId);
+        else faction.relations.put(targetId, relation);
+        requireData().setDirty();
+    }
+
+    public boolean hasBlockPermission(UUID ownerId, UUID playerId) {
+        FactionIdentity actor = factionForPlayer(playerId);
+        if (actor == null) return false;
+        if (ownerId.equals(actor.id())) return actor.rank().canBuild();
+        return relation(ownerId, actor.id()) == FactionRelation.ALLIED;
+    }
+
+    public TerritoryClaim claim(TerritoryKey key) {
+        return requireData().claims.get(key);
+    }
+
+    public Collection<TerritoryClaim> allClaims() {
+        return List.copyOf(requireData().claims.values());
+    }
+
+    public void putClaim(TerritoryKey key, UUID factionId, TerritoryType type) {
+        requireFaction(factionId);
+        requireData().claims.put(key, new TerritoryClaim(key, factionId, type));
+        requireData().setDirty();
+    }
+
+    public TerritoryClaim removeClaim(TerritoryKey key) {
+        TerritoryClaim removed = requireData().claims.remove(key);
+        if (removed != null) requireData().setDirty();
+        return removed;
+    }
+
+    public int removeAllClaims(UUID factionId) {
+        int before = requireData().claims.size();
+        requireData().claims.entrySet().removeIf(entry -> entry.getValue().factionId().equals(factionId));
+        int removed = before - requireData().claims.size();
+        if (removed > 0) requireData().setDirty();
+        return removed;
+    }
+
+    public TerritoryKey capital(UUID factionId) {
+        return requireFaction(factionId).capital;
+    }
+
+    public void setCapital(UUID factionId, TerritoryKey key) {
+        requireFaction(factionId).capital = key;
+        requireData().setDirty();
+    }
+
+    public void clearCapital(UUID factionId) {
+        requireFaction(factionId).capital = null;
+        requireData().setDirty();
+    }
+
+    public String tag(UUID factionId) {
+        return requireFaction(factionId).tag;
+    }
+
+    public void setTag(UUID factionId, String tag) {
+        requireFaction(factionId).tag = tag;
+        requireData().setDirty();
+    }
+
+    public void setName(UUID factionId, String name) {
+        requireFaction(factionId).name = name;
+        requireData().setDirty();
+    }
+
+    public void setDescription(UUID factionId, String description) {
+        requireFaction(factionId).description = description;
+        requireData().setDirty();
+    }
+
+    public void setColor(UUID factionId, int color) {
+        requireFaction(factionId).color = color & 0xFFFFFF;
+        requireData().setDirty();
+    }
+
+    public FactionChatMode chatMode(UUID playerId) {
+        return settings(playerId).chatMode;
+    }
+
+    public void setChatMode(UUID playerId, FactionChatMode mode) {
+        if (mode != FactionChatMode.GLOBAL && factionForPlayer(playerId) == null) {
+            throw new IllegalStateException("Faction chat requires a faction");
+        }
+        settings(playerId).chatMode = mode;
+        requireData().setDirty();
+    }
+
+    public boolean radarEnabled(UUID playerId) {
+        return settings(playerId).radar;
+    }
+
+    public void setRadarEnabled(UUID playerId, boolean enabled) {
+        settings(playerId).radar = enabled;
+        requireData().setDirty();
+    }
+
+    public void adjustPower(UUID factionId, int amount) {
+        FactionRecord faction = requireFaction(factionId);
+        long adjusted = (long) faction.power + amount;
+        faction.power = (int) Math.max(Integer.MIN_VALUE, Math.min(maximumPower(factionId), adjusted));
+        requireData().setDirty();
+    }
+
+    public void recordDeath(UUID factionId, UUID playerId, int penalty) {
+        if (penalty <= 0) return;
+        FactionRecord faction = requireFaction(factionId);
+        int before = faction.power;
+        adjustPower(factionId, -penalty);
+        int actualLoss = Math.max(0, before - faction.power);
+        if (actualLoss > 0) {
+            faction.deathLosses.merge(playerId, actualLoss, NativeFactionService::saturatedAdd);
+            requireData().setDirty();
+        }
+    }
+
+    public void regeneratePower(Collection<UUID> onlinePlayers) {
+        int amount = TerraFactionsConfig.POWER_REGEN_AMOUNT.get();
+        if (amount == 0) return;
+        for (UUID playerId : onlinePlayers) {
+            FactionIdentity identity = factionForPlayer(playerId);
+            if (identity == null) continue;
+            FactionRecord faction = requireFaction(identity.id());
+            int attributedLoss = faction.deathLosses.getOrDefault(playerId, 0);
+            if (attributedLoss <= 0) continue;
+            int restored = Math.min(amount, attributedLoss);
+            adjustPower(identity.id(), restored);
+            int remaining = attributedLoss - restored;
+            if (remaining == 0) faction.deathLosses.remove(playerId);
+            else faction.deathLosses.put(playerId, remaining);
+            requireData().setDirty();
+        }
+    }
+
+    public Set<UUID> members(UUID factionId) {
+        return requireData().members.entrySet().stream()
+                .filter(entry -> entry.getValue().factionId.equals(factionId))
+                .map(Map.Entry::getKey)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
+
+    private void clampPower(UUID factionId) {
+        FactionRecord faction = requireFaction(factionId);
+        faction.power = Math.min(faction.power, maximumPower(factionId));
+    }
+
+    private static int saturatedAdd(int first, int second) {
+        long value = (long) first + second;
+        return (int) Math.min(Integer.MAX_VALUE, value);
+    }
+
+    private PlayerSettings settings(UUID playerId) {
+        return requireData().settings.computeIfAbsent(playerId, ignored -> {
+            requireData().setDirty();
+            return new PlayerSettings();
+        });
+    }
+
+    private FactionRecord requireFaction(UUID factionId) {
+        FactionRecord faction = requireData().factions.get(factionId);
+        if (faction == null) throw new IllegalStateException("Faction does not exist");
+        return faction;
+    }
+
+    private NativeFactionData requireData() {
+        if (data == null) throw new IllegalStateException("Faction data is not loaded");
+        return data;
+    }
+}
