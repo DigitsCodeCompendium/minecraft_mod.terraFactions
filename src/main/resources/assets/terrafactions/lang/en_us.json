@@ -1,0 +1,23 @@
+{
+  "terrafactions.configuration.overlayEnabled": "JourneyMap Territory Overlay",
+  "terrafactions.configuration.overlayEnabled.tooltip": "Show faction territory overlays in JourneyMap.",
+  "terrafactions.configuration.hud": "Territory Radar",
+  "terrafactions.configuration.hud.button": "Configure Territory Radar",
+  "terrafactions.configuration.hud.tooltip": "Configure the territory radar displayed on the HUD.",
+  "terrafactions.configuration.hudEnabled": "Show Territory Radar",
+  "terrafactions.configuration.hudEnabled.tooltip": "Show the territory radar on the HUD.",
+  "terrafactions.configuration.scale": "HUD Scale",
+  "terrafactions.configuration.scale.tooltip": "Set the size of the territory radar. A value of 1 is normal size.",
+  "terrafactions.configuration.horizontalPercent": "Horizontal Position",
+  "terrafactions.configuration.horizontalPercent.tooltip": "Set the radar position as a percentage of the screen width.",
+  "terrafactions.configuration.verticalPercent": "Vertical Position",
+  "terrafactions.configuration.verticalPercent.tooltip": "Set the radar position as a percentage of the screen height.",
+  "terrafactions.configuration.anchor": "HUD Anchor",
+  "terrafactions.configuration.anchor.tooltip": "Choose which point on the radar is attached to its configured screen position.",
+  "terrafactions.configuration.vulnerabilityFlashEnabled": "Flash Vulnerability Warning",
+  "terrafactions.configuration.vulnerabilityFlashEnabled.tooltip": "Flash the warning when the current faction territory is vulnerable.",
+  "terrafactions.configuration.opacity": "Panel Opacity",
+  "terrafactions.configuration.opacity.tooltip": "Set the territory radar background opacity.",
+  "terrafactions.configuration.factionInfoEnabled": "Show Own Faction Info",
+  "terrafactions.configuration.factionInfoEnabled.tooltip": "Show your faction power and Border/Core security indicators inside the territory radar."
+}

@@ -74,7 +74,11 @@ Every faction automatically gets an uppercase tag from the first four letters or
 
 Only the tag is relation-colored in chat and above a player's head: blue for your own faction, green for mutual allies, red for enemies, and gray for neutral or factionless players. Faction-channel lines are additionally prefixed with `[Faction]`. Leaving, being kicked, or disbanding automatically resets faction/focus chat to global. Faction-name arguments provide tab completion.
 
-Radar briefly displays a TerraLib-styled panel with `Capital`, `Core`, `Border`, or `Wilderness` and the owning faction when entering a different area, then disappears after about three seconds.
+The persistent top-left TerraLib-styled radar displays the owning faction and `Capital`, `Core`, or `Border` on one line, or `Wilderness` when unclaimed, colored blue for your own faction, green for mutual allies, red for enemies, or gray for neutral factions and wilderness. A red/yellow flashing accent marks vulnerable territory.
+
+The same radar panel includes a compact own-faction row with `P: current/max` power followed by Border and Core security indicators.
+
+The client config can show or hide the radar or its own-faction row, set its scale, opacity, percentage-based screen position and anchor, and disable vulnerability flashing. `/factions settings radar [on|off]` remains the per-player server-side radar toggle. Radar defaults to enabled for new players.
 
 ## JourneyMap
 

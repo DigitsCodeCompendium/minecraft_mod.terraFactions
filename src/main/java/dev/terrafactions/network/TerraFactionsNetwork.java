@@ -8,7 +8,7 @@ public final class TerraFactionsNetwork {
     }
 
     public static void registerPayloads(RegisterPayloadHandlersEvent event) {
-        event.registrar("1").playToClient(
+        event.registrar("5").playToClient(
                 TerritoryRadarPayload.TYPE,
                 TerritoryRadarPayload.STREAM_CODEC,
                 (payload, context) -> TerritoryRadarHud.accept(payload));

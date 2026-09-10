@@ -8,6 +8,7 @@ import dev.terrafactions.factions.FactionIdentity;
 import dev.terrafactions.factions.FactionCommandService;
 import dev.terrafactions.factions.FactionPower;
 import dev.terrafactions.factions.FactionDisplay;
+import dev.terrafactions.factions.FactionRelation;
 import dev.terrafactions.factions.FactionRank;
 import dev.terrafactions.factions.NativeFactionService;
 import dev.terrafactions.factions.FactionSnapshot;
@@ -50,7 +51,7 @@ public final class TerritoryService {
     private final FactionDisplayService displays = new FactionDisplayService(this, factions);
     private final FactionCommandService factionCommands = new FactionCommandService(
             factions, displays::refreshNow, this::isVulnerable);
-    private final Map<UUID, RadarState> radarStates = new HashMap<>();
+    private final Map<UUID, TerritoryRadarPayload> radarStates = new HashMap<>();
     private MinecraftServer server;
 
     public void register() {
@@ -77,7 +78,6 @@ public final class TerritoryService {
     }
 
     private void onServerTick(ServerTickEvent.Post event) {
-        clearExpiredRadarMessages(event.getServer());
         if (!factions.isReady()) {
             return;
         }
@@ -87,6 +87,8 @@ public final class TerritoryService {
                     .map(ServerPlayer::getUUID).toList());
         }
         if (tick % 20 == 0) {
+            radarStates.keySet().removeIf(playerId ->
+                    event.getServer().getPlayerList().getPlayer(playerId) == null);
             reconcileCapitals();
         }
     }
@@ -208,53 +210,62 @@ public final class TerritoryService {
     }
 
     private void onFactionMovement(ServerPlayer player) {
-        if (!factions.isReady() || !factions.radarEnabled(player.getUUID())) {
-            radarStates.remove(player.getUUID());
+        if (!factions.isReady() || player.getServer() == null) {
             return;
         }
+        // Refresh twice per second. This keeps movement responsive without rebuilding faction summaries every tick.
+        if (player.getServer().getTickCount() % 10 != 0) return;
+
         TerritoryClaim claim = claimAt(currentChunk(player));
-        RadarArea area = claim == null
-                ? RadarArea.WILDERNESS
-                : new RadarArea(claim.type(), claim.factionId());
-        RadarState previous = radarStates.get(player.getUUID());
-        int tick = player.getServer() == null ? 0 : player.getServer().getTickCount();
-        if (previous == null || !previous.area().equals(area)) {
-            radarStates.put(player.getUUID(), new RadarState(area, tick + 60));
-            showRadarMessage(player, claim);
+        TerritoryRadarPayload payload = createHudPayload(player, claim);
+        TerritoryRadarPayload previous = radarStates.put(player.getUUID(), payload);
+        if (!payload.equals(previous)) {
+            PacketDistributor.sendToPlayer(player, payload);
         }
     }
 
-    private void showRadarMessage(ServerPlayer player, TerritoryClaim claim) {
-        if (claim == null) {
-            PacketDistributor.sendToPlayer(player,
-                    new TerritoryRadarPayload("Wilderness", "Unclaimed territory", 0x55AA00));
-            return;
-        }
-        FactionDisplay owner = factions.factionDisplay(claim.factionId());
-        String territoryName = switch (claim.type()) {
-            case CAPITAL -> "Capital";
-            case CORE -> "Core";
-            case BORDER -> "Border";
-        };
-        PacketDistributor.sendToPlayer(player, new TerritoryRadarPayload(
-                territoryName,
-                owner == null ? "Unknown Faction" : owner.name(),
-                owner == null ? 0xA0A0A0 : owner.color()));
-    }
+    private TerritoryRadarPayload createHudPayload(ServerPlayer player, TerritoryClaim claim) {
+        FactionIdentity viewer = factions.factionForPlayer(player.getUUID());
+        String territoryName = "";
+        String territoryFaction = "";
+        int relationColor = 0xAAAAAA;
+        boolean vulnerable = false;
+        FactionPower ownPower = viewer == null ? null : factions.power(viewer.id());
+        boolean borderVulnerable = viewer != null && isVulnerable(viewer.id(), TerritoryType.BORDER);
+        boolean coreVulnerable = viewer != null && isVulnerable(viewer.id(), TerritoryType.CORE);
 
-    private void clearExpiredRadarMessages(MinecraftServer server) {
-        int tick = server.getTickCount();
-        radarStates.replaceAll((playerId, state) -> {
-            if (state.expiresAtTick() >= 0 && state.expiresAtTick() <= tick) {
-                ServerPlayer player = server.getPlayerList().getPlayer(playerId);
-                if (player != null && factions.radarEnabled(playerId)) {
-                    PacketDistributor.sendToPlayer(player, TerritoryRadarPayload.hidden());
-                }
-                return new RadarState(state.area(), -1);
+        if (factions.radarEnabled(player.getUUID())) {
+            if (claim == null) {
+                territoryName = "Wilderness";
+                territoryFaction = "Unclaimed territory";
+            } else {
+                FactionDisplay owner = factions.factionDisplay(claim.factionId());
+                territoryName = switch (claim.type()) {
+                    case CAPITAL -> "Capital";
+                    case CORE -> "Core";
+                    case BORDER -> "Border";
+                };
+                territoryFaction = owner == null ? "Unknown Faction" : owner.name();
+                relationColor = relationColor(viewer, claim.factionId());
+                vulnerable = isVulnerable(claim);
             }
-            return state;
-        });
-        radarStates.keySet().removeIf(playerId -> server.getPlayerList().getPlayer(playerId) == null);
+        }
+
+        return new TerritoryRadarPayload(territoryName, territoryFaction, relationColor, vulnerable,
+                ownPower != null,
+                ownPower == null ? 0 : ownPower.current(),
+                ownPower == null ? 0 : ownPower.maximum(),
+                borderVulnerable, coreVulnerable);
+    }
+
+    private int relationColor(FactionIdentity viewer, UUID territoryFactionId) {
+        if (viewer != null && viewer.id().equals(territoryFactionId)) return 0x5555FF;
+        FactionRelation relation = factions.relation(viewer == null ? null : viewer.id(), territoryFactionId);
+        return switch (relation) {
+            case ENEMY -> 0xFF5555;
+            case ALLIED -> 0x55FF55;
+            case NEUTRAL -> 0xAAAAAA;
+        };
     }
 
     public String factionTag(UUID factionId) {
@@ -610,10 +621,4 @@ public final class TerritoryService {
     private record Actor(ServerPlayer player, UUID factionId, FactionRank rank) {
     }
 
-    private record RadarArea(TerritoryType type, UUID factionId) {
-        private static final RadarArea WILDERNESS = new RadarArea(null, null);
-    }
-
-    private record RadarState(RadarArea area, int expiresAtTick) {
-    }
 }

@@ -284,7 +284,7 @@ public final class NativeFactionData extends SavedData {
         FactionChatMode chatMode;
 
         PlayerSettings() {
-            this(false, FactionChatMode.GLOBAL);
+            this(true, FactionChatMode.GLOBAL);
         }
 
         PlayerSettings(boolean radar, FactionChatMode chatMode) {
