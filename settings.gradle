@@ -7,3 +7,9 @@ pluginManagement {
 plugins {
     id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
 }
+
+sourceControl {
+    gitRepository(uri('https://github.com/DigitsCodeCompendium/minecraft_mod.terraLib.git')) {
+        producesModule('com.digitscodecompendium.terralib:minecraft_mod.terraLib')
+    }
+}
