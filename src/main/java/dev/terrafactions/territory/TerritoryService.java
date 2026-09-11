@@ -15,6 +15,9 @@ import dev.terrafactions.factions.FactionSnapshot;
 import dev.terrafactions.factions.FactionDisplayService;
 import dev.terrafactions.journeymap.TerraFactionsJourneyMapPlugin;
 import dev.terrafactions.network.TerritoryRadarPayload;
+import dev.terrafactions.network.FactionUiPayload;
+import dev.terrafactions.network.FactionActionPayload;
+import dev.terrafactions.network.JourneyMapClaimPayload;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
@@ -52,6 +55,7 @@ public final class TerritoryService {
     private final FactionCommandService factionCommands = new FactionCommandService(
             factions, displays::refreshNow, this::isVulnerable);
     private final Map<UUID, TerritoryRadarPayload> radarStates = new HashMap<>();
+    private final Map<UUID, FactionUiPayload> factionUiStates = new HashMap<>();
     private MinecraftServer server;
 
     public void register() {
@@ -73,6 +77,7 @@ public final class TerritoryService {
 
     private void onServerStopped(ServerStoppedEvent event) {
         radarStates.clear();
+        factionUiStates.clear();
         factions.stop();
         server = null;
     }
@@ -83,11 +88,12 @@ public final class TerritoryService {
         }
         int tick = event.getServer().getTickCount();
         if (tick % TerraFactionsConfig.POWER_REGEN_INTERVAL_TICKS.get() == 0) {
-            factions.regeneratePower(event.getServer().getPlayerList().getPlayers().stream()
-                    .map(ServerPlayer::getUUID).toList());
+            factions.regeneratePower();
         }
         if (tick % 20 == 0) {
             radarStates.keySet().removeIf(playerId ->
+                    event.getServer().getPlayerList().getPlayer(playerId) == null);
+            factionUiStates.keySet().removeIf(playerId ->
                     event.getServer().getPlayerList().getPlayer(playerId) == null);
             reconcileCapitals();
         }
@@ -101,6 +107,10 @@ public final class TerritoryService {
 
     private void onLivingDeath(LivingDeathEvent event) {
         if (!factions.isReady() || !(event.getEntity() instanceof ServerPlayer victim)) {
+            return;
+        }
+        if (!(victim.getKillCredit() instanceof ServerPlayer killer)
+                || killer.getUUID().equals(victim.getUUID())) {
             return;
         }
         FactionIdentity identity = factions.factionForPlayer(victim.getUUID());
@@ -120,11 +130,14 @@ public final class TerritoryService {
         event.getDispatcher().register(Commands.literal("factions")
                 .then(Commands.literal("claim")
                         .executes(context -> claim(context.getSource(), TerritoryType.CORE))
+                        .then(Commands.argument("radius", IntegerArgumentType.integer(1, 7))
+                                .executes(context -> bulkClaim(context.getSource(), TerritoryType.CORE,
+                                        IntegerArgumentType.getInteger(context, "radius"))))
                         .then(Commands.literal("add")
                                 .executes(context -> claim(context.getSource(), TerritoryType.CORE))
-                                .then(Commands.argument("size", IntegerArgumentType.integer(1, 7))
+                                .then(Commands.argument("radius", IntegerArgumentType.integer(1, 7))
                                         .executes(context -> bulkClaim(context.getSource(), TerritoryType.CORE,
-                                                IntegerArgumentType.getInteger(context, "size")))))
+                                                IntegerArgumentType.getInteger(context, "radius")))))
                         .then(Commands.literal("remove")
                                 .executes(context -> unclaim(context.getSource()))
                                 .then(Commands.argument("size", IntegerArgumentType.integer(1, 7))
@@ -133,18 +146,15 @@ public final class TerritoryService {
                         .then(Commands.literal("auto").executes(context -> unsupportedAutoClaim(context.getSource())))
                         .then(Commands.literal("core")
                                 .executes(context -> claim(context.getSource(), TerritoryType.CORE))
-                                .then(Commands.argument("size", IntegerArgumentType.integer(1, 7))
+                                .then(Commands.argument("radius", IntegerArgumentType.integer(1, 7))
                                         .executes(context -> bulkClaim(context.getSource(), TerritoryType.CORE,
-                                                IntegerArgumentType.getInteger(context, "size")))))
+                                                IntegerArgumentType.getInteger(context, "radius")))))
                         .then(Commands.literal("border")
                                 .executes(context -> claim(context.getSource(), TerritoryType.BORDER))
-                                .then(Commands.argument("size", IntegerArgumentType.integer(1, 7))
+                                .then(Commands.argument("radius", IntegerArgumentType.integer(1, 7))
                                         .executes(context -> bulkClaim(context.getSource(), TerritoryType.BORDER,
-                                                IntegerArgumentType.getInteger(context, "size"))))))
+                                                IntegerArgumentType.getInteger(context, "radius"))))))
                 .then(Commands.literal("unclaim").executes(context -> unclaim(context.getSource())))
-                .then(Commands.literal("overclaim")
-                        .then(Commands.literal("core").executes(context -> overclaim(context.getSource(), TerritoryType.CORE)))
-                        .then(Commands.literal("border").executes(context -> overclaim(context.getSource(), TerritoryType.BORDER))))
                 .then(Commands.literal("liberate").executes(context -> liberate(context.getSource())))
                 .then(Commands.literal("convert")
                         .then(Commands.literal("core").executes(context -> claim(context.getSource(), TerritoryType.CORE)))
@@ -158,9 +168,6 @@ public final class TerritoryService {
     private void registerCommands(CommandDispatcher<CommandSourceStack> dispatcher, String root) {
         dispatcher.register(Commands.literal(root).then(buildTerritoryCommands("claim"))
                 .then(Commands.literal("unclaim").executes(context -> unclaim(context.getSource())))
-                .then(Commands.literal("overclaim")
-                        .then(Commands.literal("core").executes(context -> overclaim(context.getSource(), TerritoryType.CORE)))
-                        .then(Commands.literal("border").executes(context -> overclaim(context.getSource(), TerritoryType.BORDER))))
                 .then(Commands.literal("liberate").executes(context -> liberate(context.getSource())))
                 .then(Commands.literal("convert")
                         .then(Commands.literal("core").executes(context -> claim(context.getSource(), TerritoryType.CORE)))
@@ -172,20 +179,20 @@ public final class TerritoryService {
 
     private com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack> buildTerritoryCommands(String name) {
         return Commands.literal(name)
+                .then(Commands.argument("radius", IntegerArgumentType.integer(1, 7))
+                        .executes(context -> bulkClaim(context.getSource(), TerritoryType.CORE,
+                                IntegerArgumentType.getInteger(context, "radius"))))
                 .then(Commands.literal("core")
                         .executes(context -> claim(context.getSource(), TerritoryType.CORE))
-                        .then(Commands.argument("size", IntegerArgumentType.integer(1, 7))
+                        .then(Commands.argument("radius", IntegerArgumentType.integer(1, 7))
                                 .executes(context -> bulkClaim(context.getSource(), TerritoryType.CORE,
-                                        IntegerArgumentType.getInteger(context, "size")))))
+                                        IntegerArgumentType.getInteger(context, "radius")))))
                 .then(Commands.literal("border")
                         .executes(context -> claim(context.getSource(), TerritoryType.BORDER))
-                        .then(Commands.argument("size", IntegerArgumentType.integer(1, 7))
+                        .then(Commands.argument("radius", IntegerArgumentType.integer(1, 7))
                                 .executes(context -> bulkClaim(context.getSource(), TerritoryType.BORDER,
-                                        IntegerArgumentType.getInteger(context, "size")))))
+                                        IntegerArgumentType.getInteger(context, "radius")))))
                 .then(Commands.literal("unclaim").executes(context -> unclaim(context.getSource())))
-                .then(Commands.literal("overclaim")
-                        .then(Commands.literal("core").executes(context -> overclaim(context.getSource(), TerritoryType.CORE)))
-                        .then(Commands.literal("border").executes(context -> overclaim(context.getSource(), TerritoryType.BORDER))))
                 .then(Commands.literal("liberate").executes(context -> liberate(context.getSource())))
                 .then(Commands.literal("convert")
                         .then(Commands.literal("core").executes(context -> claim(context.getSource(), TerritoryType.CORE)))
@@ -205,6 +212,54 @@ public final class TerritoryService {
         return factions;
     }
 
+    /** Handles native dashboard requests directly on the server thread. */
+    public void handleUiAction(ServerPlayer player, FactionActionPayload payload) {
+        CommandSourceStack source = player.createCommandSourceStack().withSuppressedOutput();
+        try {
+            switch (payload.action()) {
+                case CLAIM_CORE -> claim(source, TerritoryType.CORE);
+                case CLAIM_BORDER -> claim(source, TerritoryType.BORDER);
+                case UNCLAIM -> unclaim(source);
+                case SET_CAPITAL -> setCapital(source);
+                case SET_OVERLAY -> setOverlay(source, payload.enabled());
+                default -> factionCommands.handleUiAction(player, payload);
+            }
+        } catch (com.mojang.brigadier.exceptions.CommandSyntaxException exception) {
+            source.sendFailure(Component.literal(exception.getMessage()));
+        }
+        syncClientState(player, true);
+    }
+
+    /** Handles a chunk selected through JourneyMap, with all authority enforced server-side. */
+    public void handleJourneyMapClaim(ServerPlayer player, JourneyMapClaimPayload payload) {
+        CommandSourceStack source = player.createCommandSourceStack();
+        TerritoryKey playerChunk = currentChunk(player);
+        TerritoryKey target = TerritoryKey.of(payload.dimension(), payload.chunkX(), payload.chunkZ());
+        int radius = TerraFactionsConfig.JOURNEYMAP_CLAIM_RADIUS.get();
+        if (!target.dimension().equals(playerChunk.dimension())) {
+            fail(source, "JourneyMap claims must be in your current dimension.");
+            return;
+        }
+        long deltaX = Math.abs((long) target.x() - playerChunk.x());
+        long deltaZ = Math.abs((long) target.z() - playerChunk.z());
+        if (Math.max(deltaX, deltaZ) > radius) {
+            fail(source, "That chunk is outside the JourneyMap claim radius of " + radius + " chunks.");
+            return;
+        }
+        try {
+            Actor actor = actor(source);
+            switch (payload.action()) {
+                case CLAIM_CORE -> claim(source, actor, TerritoryType.CORE, target);
+                case CLAIM_BORDER -> claim(source, actor, TerritoryType.BORDER, target);
+                case UNCLAIM -> unclaim(source, actor, target);
+                case LIBERATE -> liberate(source, actor, target);
+            }
+        } catch (com.mojang.brigadier.exceptions.CommandSyntaxException exception) {
+            source.sendFailure(Component.literal(exception.getMessage()));
+        }
+        syncClientState(player, true);
+    }
+
     public TerritoryClaim claimAt(TerritoryKey key) {
         return factions.isReady() ? factions.claim(key) : null;
     }
@@ -216,12 +271,88 @@ public final class TerritoryService {
         // Refresh twice per second. This keeps movement responsive without rebuilding faction summaries every tick.
         if (player.getServer().getTickCount() % 10 != 0) return;
 
+        syncClientState(player, false);
+    }
+
+    private void syncClientState(ServerPlayer player, boolean force) {
         TerritoryClaim claim = claimAt(currentChunk(player));
         TerritoryRadarPayload payload = createHudPayload(player, claim);
         TerritoryRadarPayload previous = radarStates.put(player.getUUID(), payload);
-        if (!payload.equals(previous)) {
+        if (force || !payload.equals(previous)) {
             PacketDistributor.sendToPlayer(player, payload);
         }
+        FactionUiPayload uiPayload = createFactionUiPayload(player);
+        FactionUiPayload previousUi = factionUiStates.put(player.getUUID(), uiPayload);
+        if (force || !uiPayload.equals(previousUi)) {
+            PacketDistributor.sendToPlayer(player, uiPayload);
+        }
+    }
+
+    private FactionUiPayload createFactionUiPayload(ServerPlayer player) {
+        FactionIdentity identity = factions.factionForPlayer(player.getUUID());
+        List<FactionUiPayload.FactionEntry> factionEntries = factions.allFactions().stream()
+                .filter(faction -> identity == null || !faction.id().equals(identity.id()))
+                .map(faction -> new FactionUiPayload.FactionEntry(
+                        faction.name(), factions.tag(faction.id()), faction.color(),
+                        factions.members(faction.id()).size(),
+                        factions.relation(identity == null ? null : identity.id(), faction.id()).ordinal(),
+                        factions.declaredRelation(identity == null ? null : identity.id(), faction.id()).ordinal(),
+                        factions.declaredRelation(faction.id(), identity == null ? null : identity.id()).ordinal()))
+                .toList();
+        if (identity == null) {
+            return new FactionUiPayload("", "", "", 0xAAAAAA, -1,
+                    0, 0, 0, 0, TerraFactionsConfig.BASE_POWER.get(),
+                    TerraFactionsConfig.POWER_PER_MEMBER.get(), TerraFactionsConfig.CORE_CLAIM_COST.get(),
+                    TerraFactionsConfig.BORDER_CLAIM_COST.get(), 0, 0, 0, "", false, false,
+                    factions.radarEnabled(player.getUUID()), factions.chatMode(player.getUUID()).ordinal(),
+                    List.of(), List.of(), factionEntries);
+        }
+
+        FactionSnapshot faction = factions.snapshot(identity.id());
+        FactionPower power = factions.power(identity.id());
+        Set<UUID> memberIds = factions.members(identity.id());
+        List<FactionUiPayload.MemberEntry> members = memberIds.stream()
+                .map(memberId -> {
+                    ServerPlayer onlinePlayer = player.getServer().getPlayerList().getPlayer(memberId);
+                    String memberName = playerName(player.getServer(), memberId);
+                    FactionIdentity member = factions.factionForPlayer(memberId);
+                    return new FactionUiPayload.MemberEntry(memberName,
+                            member == null ? FactionRank.MEMBER.ordinal() : member.rank().ordinal(),
+                            onlinePlayer != null, power.deathLossByPlayer().getOrDefault(memberId, 0));
+                })
+                .sorted(Comparator.comparingInt(FactionUiPayload.MemberEntry::rankOrdinal)
+                        .thenComparing(FactionUiPayload.MemberEntry::name, String.CASE_INSENSITIVE_ORDER))
+                .toList();
+        List<FactionUiPayload.LossEntry> losses = power.deathLossByPlayer().entrySet().stream()
+                .filter(entry -> entry.getValue() > 0)
+                .map(entry -> new FactionUiPayload.LossEntry(
+                        playerName(player.getServer(), entry.getKey()), entry.getValue(),
+                        memberIds.contains(entry.getKey())))
+                .sorted(Comparator.comparingInt(FactionUiPayload.LossEntry::amount).reversed()
+                        .thenComparing(FactionUiPayload.LossEntry::name, String.CASE_INSENSITIVE_ORDER))
+                .toList();
+        int capitalClaims = (int) faction.claims().stream().filter(claim -> claim.type() == TerritoryType.CAPITAL).count();
+        int coreClaims = (int) faction.claims().stream().filter(claim -> claim.type() == TerritoryType.CORE).count();
+        int borderClaims = (int) faction.claims().stream().filter(claim -> claim.type() == TerritoryType.BORDER).count();
+        String capital = faction.capital() == null ? "" : faction.capital().x() + ", " + faction.capital().z()
+                + " (" + faction.capital().dimension() + ")";
+        return new FactionUiPayload(faction.name(), faction.description(), factions.tag(identity.id()),
+                faction.color(), identity.rank().ordinal(), power.current(), power.maximum(), power.claimUsage(),
+                power.deathLoss(), TerraFactionsConfig.BASE_POWER.get(), TerraFactionsConfig.POWER_PER_MEMBER.get(),
+                TerraFactionsConfig.CORE_CLAIM_COST.get(), TerraFactionsConfig.BORDER_CLAIM_COST.get(),
+                capitalClaims, coreClaims, borderClaims, capital,
+                isVulnerable(identity.id(), TerritoryType.CORE),
+                isVulnerable(identity.id(), TerritoryType.BORDER),
+                factions.radarEnabled(player.getUUID()), factions.chatMode(player.getUUID()).ordinal(),
+                members, losses, factionEntries);
+    }
+
+    private static String playerName(MinecraftServer server, UUID playerId) {
+        ServerPlayer onlinePlayer = server.getPlayerList().getPlayer(playerId);
+        return onlinePlayer != null
+                ? onlinePlayer.getGameProfile().getName()
+                : server.getProfileCache().get(playerId)
+                        .map(profile -> profile.getName()).orElse(playerId.toString());
     }
 
     private TerritoryRadarPayload createHudPayload(ServerPlayer player, TerritoryClaim claim) {
@@ -253,6 +384,7 @@ public final class TerritoryService {
 
         return new TerritoryRadarPayload(territoryName, territoryFaction, relationColor, vulnerable,
                 ownPower != null,
+                viewer == null ? -1 : viewer.rank().ordinal(),
                 ownPower == null ? 0 : ownPower.current(),
                 ownPower == null ? 0 : ownPower.maximum(),
                 borderVulnerable, coreVulnerable);
@@ -277,10 +409,13 @@ public final class TerritoryService {
 
     private int claim(CommandSourceStack source, TerritoryType type) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         Actor actor = actor(source);
-        TerritoryKey key = currentChunk(actor.player());
+        return claim(source, actor, type, currentChunk(actor.player()));
+    }
+
+    private int claim(CommandSourceStack source, Actor actor, TerritoryType type, TerritoryKey key) {
         TerritoryClaim existing = claimAt(key);
         if (existing != null && !existing.factionId().equals(actor.factionId())) {
-            return fail(source, "That chunk belongs to another faction; use overclaim when it becomes vulnerable.");
+            return captureEnemyClaim(source, actor, type, key);
         }
         if (existing != null && existing.type() == type) {
             return fail(source, "That chunk is already " + type.name().toLowerCase() + " territory.");
@@ -308,7 +443,10 @@ public final class TerritoryService {
 
     private int unclaim(CommandSourceStack source) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         Actor actor = actor(source);
-        TerritoryKey key = currentChunk(actor.player());
+        return unclaim(source, actor, currentChunk(actor.player()));
+    }
+
+    private int unclaim(CommandSourceStack source, Actor actor, TerritoryKey key) {
         TerritoryClaim existing = claimAt(key);
         if (existing == null || !existing.factionId().equals(actor.factionId())) {
             return fail(source, "Your faction does not own this chunk.");
@@ -332,11 +470,11 @@ public final class TerritoryService {
         return success(source, "Removed all " + removed + " claims.");
     }
 
-    private int bulkClaim(CommandSourceStack source, TerritoryType requestedType, int size)
+    private int bulkClaim(CommandSourceStack source, TerritoryType requestedType, int radius)
             throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         Actor actor = actor(source);
         TerritoryKey center = currentChunk(actor.player());
-        Set<TerritoryKey> square = TerritoryRules.centeredSquare(center, size);
+        Set<TerritoryKey> square = TerritoryRules.centeredSquare(center, radius);
         Set<TerritoryKey> ownedInDimension = territory(actor.factionId(), center.dimension());
         List<TerritoryKey> additions = square.stream().filter(key -> !ownedInDimension.contains(key)).toList();
         for (TerritoryKey key : additions) {
@@ -382,7 +520,7 @@ public final class TerritoryService {
         }
         ensureCapital(actor.factionId());
         return success(source, "Claimed " + added.size() + " chunks as " + requestedType.name().toLowerCase()
-                + " (size " + size + ", " + (size * 2 - 1) + "x" + (size * 2 - 1) + ").");
+                + " (radius " + radius + ", " + (radius * 2 + 1) + "x" + (radius * 2 + 1) + ").");
     }
 
     private static int unsupportedBulk(CommandSourceStack source) {
@@ -393,12 +531,10 @@ public final class TerritoryService {
         return fail(source, "Autoclaim is disabled. Use /factions claim core or /factions claim border.");
     }
 
-    private int overclaim(CommandSourceStack source, TerritoryType resultType) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
-        Actor actor = actor(source);
-        TerritoryKey key = currentChunk(actor.player());
+    private int captureEnemyClaim(CommandSourceStack source, Actor actor, TerritoryType resultType, TerritoryKey key) {
         TerritoryClaim target = claimAt(key);
         if (target == null || target.factionId().equals(actor.factionId())) {
-            return fail(source, "Stand inside vulnerable enemy territory to overclaim it.");
+            return fail(source, "Stand inside vulnerable enemy territory to claim it.");
         }
         if (!factions.isEnemy(target.factionId(), actor.factionId())) {
             return fail(source, "Only an enemy faction's territory can be attacked.");
@@ -407,7 +543,7 @@ public final class TerritoryService {
             return fail(source, "This " + target.type().name().toLowerCase() + " claim is not vulnerable.");
         }
         if (!TerritoryRules.touches(territory(actor.factionId(), key.dimension()), key)) {
-            return fail(source, "An overclaim must share a side with your faction's territory.");
+            return fail(source, "A captured claim must share a side with your faction's territory.");
         }
         if (!hasCapacity(actor.factionId(), resultType, null)) {
             return fail(source, "Your faction does not have enough power capacity for that claim type.");
@@ -421,7 +557,11 @@ public final class TerritoryService {
 
     private int liberate(CommandSourceStack source) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         Actor actor = actor(source);
-        TerritoryClaim target = claimAt(currentChunk(actor.player()));
+        return liberate(source, actor, currentChunk(actor.player()));
+    }
+
+    private int liberate(CommandSourceStack source, Actor actor, TerritoryKey key) {
+        TerritoryClaim target = claimAt(key);
         if (target == null || target.factionId().equals(actor.factionId())) {
             return fail(source, "Stand inside vulnerable enemy territory to liberate it.");
         }
@@ -433,7 +573,7 @@ public final class TerritoryService {
         }
         remove(target);
         ensureCapital(target.factionId());
-        return success(source, "Liberated the chunk; it is now wilderness.");
+        return success(source, "Liberated " + key.x() + ", " + key.z() + "; it is now wilderness.");
     }
 
     private int setCapital(CommandSourceStack source) throws com.mojang.brigadier.exceptions.CommandSyntaxException {

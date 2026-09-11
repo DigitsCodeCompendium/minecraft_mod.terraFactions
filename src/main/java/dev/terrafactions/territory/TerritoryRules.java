@@ -51,10 +51,10 @@ public final class TerritoryRules {
         return visited.size() == remaining.size();
     }
 
-    /** A centered square where size 1 is one chunk, size 2 is 3x3, and so on. */
-    public static Set<TerritoryKey> centeredSquare(TerritoryKey center, int size) {
+    /** A centered square extending the requested chunk radius in every cardinal direction. */
+    public static Set<TerritoryKey> centeredSquare(TerritoryKey center, int radius) {
         Set<TerritoryKey> result = new LinkedHashSet<>();
-        int radius = Math.max(0, size - 1);
+        radius = Math.max(0, radius);
         for (int x = -radius; x <= radius; x++) {
             for (int z = -radius; z <= radius; z++) {
                 result.add(center.offset(x, z));

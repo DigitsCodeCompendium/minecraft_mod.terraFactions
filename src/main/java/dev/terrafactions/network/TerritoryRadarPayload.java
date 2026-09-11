@@ -1,6 +1,7 @@
 package dev.terrafactions.network;
 
 import dev.terrafactions.TerraFactions;
+import dev.terrafactions.factions.FactionRank;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
@@ -12,6 +13,7 @@ public record TerritoryRadarPayload(
         int relationColor,
         boolean vulnerable,
         boolean factionInfoVisible,
+        int factionRankOrdinal,
         int power,
         int maximumPower,
         boolean borderVulnerable,
@@ -26,6 +28,7 @@ public record TerritoryRadarPayload(
                 buffer.writeInt(payload.relationColor);
                 buffer.writeBoolean(payload.vulnerable);
                 buffer.writeBoolean(payload.factionInfoVisible);
+                buffer.writeInt(payload.factionRankOrdinal);
                 buffer.writeInt(payload.power);
                 buffer.writeInt(payload.maximumPower);
                 buffer.writeBoolean(payload.borderVulnerable);
@@ -33,14 +36,22 @@ public record TerritoryRadarPayload(
             },
             buffer -> new TerritoryRadarPayload(
                     buffer.readUtf(), buffer.readUtf(), buffer.readInt(), buffer.readBoolean(),
-                    buffer.readBoolean(), buffer.readInt(), buffer.readInt(), buffer.readBoolean(), buffer.readBoolean()));
+                    buffer.readBoolean(), buffer.readInt(), buffer.readInt(), buffer.readInt(),
+                    buffer.readBoolean(), buffer.readBoolean()));
 
     public static TerritoryRadarPayload hidden() {
-        return new TerritoryRadarPayload("", "", 0, false, false, 0, 0, false, false);
+        return new TerritoryRadarPayload("", "", 0, false, false, -1, 0, 0, false, false);
     }
 
     public boolean radarVisible() {
         return !territory.isEmpty();
+    }
+
+    public FactionRank factionRank() {
+        FactionRank[] ranks = FactionRank.values();
+        return factionRankOrdinal >= 0 && factionRankOrdinal < ranks.length
+                ? ranks[factionRankOrdinal]
+                : null;
     }
 
     @Override

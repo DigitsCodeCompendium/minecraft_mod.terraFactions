@@ -16,6 +16,7 @@ import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.network.chat.Style;
 import net.minecraft.server.level.ServerPlayer;
 import dev.terrafactions.territory.TerritoryType;
+import dev.terrafactions.network.FactionActionPayload;
 
 import java.util.Comparator;
 import java.util.Locale;
@@ -116,6 +117,54 @@ public final class FactionCommandService {
                                         .executes(context -> previewLegacyImport(context.getSource())))
                                 .then(Commands.literal("confirm")
                                         .executes(context -> confirmLegacyImport(context.getSource()))))));
+    }
+
+    /** Executes a typed dashboard request without routing it through Brigadier or parsing command text. */
+    public int handleUiAction(ServerPlayer player, FactionActionPayload payload) throws CommandSyntaxException {
+        CommandSourceStack source = player.createCommandSourceStack().withSuppressedOutput();
+        try {
+            return switch (payload.action()) {
+                case CREATE -> create(source, payload.primary());
+                case JOIN -> join(source, payload.primary());
+                case LEAVE -> leave(source);
+                case DISBAND -> disband(source);
+                case INVITE -> {
+                    ServerPlayer target = onlinePlayer(source, payload.primary());
+                    yield target == null ? fail(source, "That player must be online.") : invite(source, target);
+                }
+                case KICK -> {
+                    ServerPlayer target = onlinePlayer(source, payload.primary());
+                    yield target == null ? fail(source, "That player must be online.") : kick(source, target);
+                }
+                case SET_RANK -> {
+                    ServerPlayer target = onlinePlayer(source, payload.primary());
+                    if (target == null) yield fail(source, "That player must be online.");
+                    FactionRank rank = FactionRank.valueOf(payload.secondary().toUpperCase(Locale.ROOT));
+                    yield rank == FactionRank.OWNER
+                            ? transferOwnership(source, target) : setRank(source, target, rank);
+                }
+                case DECLARE_RELATION -> setRelation(source, payload.primary(),
+                        FactionRelation.valueOf(payload.secondary().toUpperCase(Locale.ROOT)));
+                case SET_NAME -> setName(source, payload.primary());
+                case SET_DESCRIPTION -> setDescription(source, payload.primary());
+                case SET_COLOR -> setColor(source, payload.primary());
+                case SET_TAG -> setTag(source, payload.primary());
+                case SET_RADAR -> setRadar(source, payload.enabled());
+                case SET_CHAT -> setChat(source,
+                        FactionChatMode.valueOf(payload.primary().toUpperCase(Locale.ROOT)));
+                case IMPORT_PREVIEW -> player.hasPermissions(3)
+                        ? previewLegacyImport(source) : fail(source, "Operator permission is required.");
+                case IMPORT_CONFIRM -> player.hasPermissions(3)
+                        ? confirmLegacyImport(source) : fail(source, "Operator permission is required.");
+                default -> fail(source, "That action is not a faction-management action.");
+            };
+        } catch (IllegalArgumentException exception) {
+            return fail(source, "The dashboard request contained an invalid option.");
+        }
+    }
+
+    private static ServerPlayer onlinePlayer(CommandSourceStack source, String name) {
+        return source.getServer().getPlayerList().getPlayerByName(name.trim());
     }
 
     private LiteralArgumentBuilder<CommandSourceStack> rankLiteral(String name, FactionRank rank) {

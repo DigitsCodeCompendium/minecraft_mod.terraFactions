@@ -202,9 +202,10 @@ public final class NativeFactionService {
         MemberRecord member = state.members.get(playerId);
         if (member == null) return;
         if (member.rank == FactionRank.OWNER) throw new IllegalStateException("The owner must transfer ownership or disband");
+        int previousMaximum = maximumPower(member.factionId);
         state.members.remove(playerId);
         settings(playerId).chatMode = FactionChatMode.GLOBAL;
-        clampPower(member.factionId);
+        preservePowerDeficit(member.factionId, previousMaximum);
         state.setDirty();
     }
 
@@ -213,9 +214,10 @@ public final class NativeFactionService {
         MemberRecord member = state.members.get(playerId);
         if (member == null || !member.factionId.equals(factionId)) throw new IllegalStateException("Player is not in that faction");
         if (member.rank == FactionRank.OWNER) throw new IllegalStateException("The faction owner cannot be kicked");
+        int previousMaximum = maximumPower(factionId);
         state.members.remove(playerId);
         settings(playerId).chatMode = FactionChatMode.GLOBAL;
-        clampPower(factionId);
+        preservePowerDeficit(factionId, previousMaximum);
         state.setDirty();
     }
 
@@ -256,6 +258,17 @@ public final class NativeFactionService {
         if (forward == FactionRelation.ENEMY || reverse == FactionRelation.ENEMY) return FactionRelation.ENEMY;
         return forward == FactionRelation.ALLIED && reverse == FactionRelation.ALLIED
                 ? FactionRelation.ALLIED : FactionRelation.NEUTRAL;
+    }
+
+    /** Returns one faction's declaration toward another without resolving the reciprocal relationship. */
+    public FactionRelation declaredRelation(UUID factionId, UUID targetFactionId) {
+        if (factionId == null || targetFactionId == null) return FactionRelation.NEUTRAL;
+        if (factionId.equals(targetFactionId)) return FactionRelation.ALLIED;
+        FactionRecord faction = requireData().factions.get(factionId);
+        if (faction == null || !requireData().factions.containsKey(targetFactionId)) {
+            return FactionRelation.NEUTRAL;
+        }
+        return faction.relations.getOrDefault(targetFactionId, FactionRelation.NEUTRAL);
     }
 
     public boolean isEnemy(UUID firstFactionId, UUID secondFactionId) {
@@ -384,21 +397,27 @@ public final class NativeFactionService {
         }
     }
 
-    public void regeneratePower(Collection<UUID> onlinePlayers) {
+    public void regeneratePower() {
         int amount = TerraFactionsConfig.POWER_REGEN_AMOUNT.get();
         if (amount == 0) return;
-        for (UUID playerId : onlinePlayers) {
-            FactionIdentity identity = factionForPlayer(playerId);
-            if (identity == null) continue;
-            FactionRecord faction = requireFaction(identity.id());
-            int attributedLoss = faction.deathLosses.getOrDefault(playerId, 0);
-            if (attributedLoss <= 0) continue;
-            int restored = Math.min(amount, attributedLoss);
-            adjustPower(identity.id(), restored);
-            int remaining = attributedLoss - restored;
-            if (remaining == 0) faction.deathLosses.remove(playerId);
-            else faction.deathLosses.put(playerId, remaining);
-            requireData().setDirty();
+        for (FactionRecord faction : requireData().factions.values()) {
+            var losses = faction.deathLosses.entrySet().iterator();
+            while (losses.hasNext()) {
+                Map.Entry<UUID, Integer> loss = losses.next();
+                int attributedLoss = loss.getValue();
+                if (attributedLoss <= 0) {
+                    losses.remove();
+                    continue;
+                }
+                int before = faction.power;
+                adjustPower(faction.id, Math.min(amount, attributedLoss));
+                int restored = Math.max(0, faction.power - before);
+                if (restored == 0) continue;
+                int remaining = attributedLoss - restored;
+                if (remaining == 0) losses.remove();
+                else loss.setValue(remaining);
+                requireData().setDirty();
+            }
         }
     }
 
@@ -412,6 +431,13 @@ public final class NativeFactionService {
     private void clampPower(UUID factionId) {
         FactionRecord faction = requireFaction(factionId);
         faction.power = Math.min(faction.power, maximumPower(factionId));
+    }
+
+    private void preservePowerDeficit(UUID factionId, int previousMaximum) {
+        FactionRecord faction = requireFaction(factionId);
+        long deficit = Math.max(0L, previousMaximum - (long) faction.power);
+        long adjusted = maximumPower(factionId) - deficit;
+        faction.power = (int) Math.max(Integer.MIN_VALUE, adjusted);
     }
 
     private static int saturatedAdd(int first, int second) {

@@ -42,15 +42,13 @@ Faction members except guests can build in their own territory. Mutual allies re
 /factions unclaim
 /factions convert core
 /factions convert border
-/factions overclaim core
-/factions overclaim border
 /factions liberate
 /factions capital set
 ```
 
 New claims must share a cardinal edge with existing faction territory in that dimension, and voluntary unclaims cannot split it. A bulk size of 2 claims a centered 3x3 square, size 3 claims 5x5, and so on; the operation is all-or-nothing. The first claim becomes the faction capital. Leadership can move the capital only to a core chunk, which converts the old capital back to core. Move the capital before unclaiming or converting it.
 
-Border claims become vulnerable at or below 30% of maximum faction power by default. Core and capital become vulnerable at zero available power. `/factions info` shows the current secure/vulnerable status for core and border claims. Enemies can convert an adjacent vulnerable claim into either type with `overclaim`, or remove it with `liberate`.
+Border claims become vulnerable at or below 30% of maximum faction power by default. Core and capital become vulnerable at zero available power. `/factions info` shows the current secure/vulnerable status for core and border claims. Claiming an adjacent vulnerable enemy chunk automatically captures it as the requested type. `liberate` removes vulnerable enemy territory instead.
 
 Claim costs reduce the faction's available power:
 
@@ -73,6 +71,8 @@ Every faction automatically gets an uppercase tag from the first four letters or
 ```
 
 Only the tag is relation-colored in chat and above a player's head: blue for your own faction, green for mutual allies, red for enemies, and gray for neutral or factionless players. Faction-channel lines are additionally prefixed with `[Faction]`. Leaving, being kicked, or disbanding automatically resets faction/focus chat to global. Faction-name arguments provide tab completion.
+
+Press `G` (rebindable under Controls) or run `/factionsui` to open the TerraLib faction dashboard. It presents live faction identity and power, a scrollable member roster, claim and vulnerability summaries, a relation-aware faction directory, editable identity forms, and personal settings. Management controls are shown only when the player's faction rank permits them. The dashboard uses typed network actions handled directly by the server, where normal permission and territory validation remains in force.
 
 The persistent top-left TerraLib-styled radar displays the owning faction and `Capital`, `Core`, or `Border` on one line, or `Wilderness` when unclaimed, colored blue for your own faction, green for mutual allies, red for enemies, or gray for neutral factions and wilderness. A red/yellow flashing accent marks vulnerable territory.
 

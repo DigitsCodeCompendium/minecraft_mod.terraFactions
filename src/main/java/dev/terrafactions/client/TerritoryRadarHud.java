@@ -3,6 +3,7 @@ package dev.terrafactions.client;
 import com.digitscodecompendium.terralib.client.gui.HudPanelPlacement;
 import com.digitscodecompendium.terralib.client.gui.TerraGui;
 import com.digitscodecompendium.terralib.client.gui.TerraUiTheme;
+import dev.terrafactions.factions.FactionRank;
 import dev.terrafactions.journeymap.TerraFactionsClientConfig;
 import dev.terrafactions.network.TerritoryRadarPayload;
 import net.minecraft.client.DeltaTracker;
@@ -27,6 +28,10 @@ public final class TerritoryRadarHud {
 
     public static void accept(TerritoryRadarPayload payload) {
         state = payload;
+    }
+
+    static FactionRank playerFactionRank() {
+        return state.factionRank();
     }
 
     /** Renders the independently configured territory radar. */

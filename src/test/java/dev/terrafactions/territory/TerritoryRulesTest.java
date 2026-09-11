@@ -45,10 +45,11 @@ class TerritoryRulesTest {
     }
 
     @Test
-    void centeredBulkSizesMatchFactionCommandSemantics() {
-        assertEquals(Set.of(key(0, 0)), TerritoryRules.centeredSquare(key(0, 0), 1));
-        assertEquals(9, TerritoryRules.centeredSquare(key(0, 0), 2).size());
-        assertTrue(TerritoryRules.centeredSquare(key(0, 0), 2).contains(key(-1, 1)));
+    void centeredBulkRadiusMatchesFactionCommandSemantics() {
+        assertEquals(Set.of(key(0, 0)), TerritoryRules.centeredSquare(key(0, 0), 0));
+        assertEquals(9, TerritoryRules.centeredSquare(key(0, 0), 1).size());
+        assertEquals(25, TerritoryRules.centeredSquare(key(0, 0), 2).size());
+        assertTrue(TerritoryRules.centeredSquare(key(0, 0), 2).contains(key(-2, 2)));
     }
 
     @Test
