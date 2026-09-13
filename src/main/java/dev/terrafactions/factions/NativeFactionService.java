@@ -1,8 +1,11 @@
 package dev.terrafactions.factions;
 
+import dev.terrafactions.anchor.AnchorMapSnapshot;
+import dev.terrafactions.anchor.AnchorNetworkRules;
 import dev.terrafactions.factions.FactionSnapshot.CapitalSnapshot;
 import dev.terrafactions.factions.FactionSnapshot.ClaimSnapshot;
 import dev.terrafactions.factions.NativeFactionData.FactionRecord;
+import dev.terrafactions.factions.NativeFactionData.AnchorRecord;
 import dev.terrafactions.factions.NativeFactionData.MemberRecord;
 import dev.terrafactions.factions.NativeFactionData.PlayerSettings;
 import dev.terrafactions.territory.TerraFactionsConfig;
@@ -110,25 +113,42 @@ public final class NativeFactionService {
         if (faction == null) return null;
         int maximum = maximumPower(factionId);
         int claimUsage = claimUsage(factionId);
-        int deathLoss = Math.max(0, maximum - faction.power);
+        int deathLoss = (int) Math.min(Integer.MAX_VALUE,
+                Math.max(0L, (long) maximum - faction.power));
         long available = (long) faction.power - claimUsage;
         return new FactionPower((int) Math.max(Integer.MIN_VALUE, available), maximum,
-                claimUsage, deathLoss, faction.deathLosses);
+                claimUsage, deathLoss, faction.specialPower, faction.deathLosses);
     }
 
     public int claimUsage(UUID factionId) {
-        long usage = requireData().claims.values().stream()
+        NativeFactionData state = requireData();
+        long usage = state.claims.values().stream()
                 .filter(claim -> claim.factionId().equals(factionId))
-                .mapToLong(claim -> claim.type().cost()).sum();
-        return (int) Math.min(Integer.MAX_VALUE, usage);
+                .mapToLong(TerritoryClaim::powerCostTenths).sum();
+        usage += state.anchors.values().stream()
+                .filter(anchor -> anchor.factionId.equals(factionId))
+                .mapToLong(anchor -> AnchorNetworkRules.requiredPowerTenths(
+                        anchor.tier, anchor.projectedClaims))
+                .sum();
+        return (int) Math.min(Integer.MAX_VALUE, (usage + 9L) / 10L);
     }
 
     public int maximumPower(UUID factionId) {
         long members = requireData().members.values().stream()
                 .filter(member -> member.factionId.equals(factionId)).count();
         long maximum = TerraFactionsConfig.BASE_POWER.get()
-                + members * (long) TerraFactionsConfig.POWER_PER_MEMBER.get();
-        return (int) Math.min(Integer.MAX_VALUE, maximum);
+                + members * (long) TerraFactionsConfig.POWER_PER_MEMBER.get()
+                + requireFaction(factionId).specialPower;
+        return (int) Math.max(0L, Math.min(Integer.MAX_VALUE, maximum));
+    }
+
+    public void adjustSpecialPower(UUID factionId, int amount) {
+        FactionRecord faction = requireFaction(factionId);
+        int previousMaximum = maximumPower(factionId);
+        long adjusted = (long) faction.specialPower + amount;
+        faction.specialPower = (int) Math.max(Integer.MIN_VALUE, Math.min(Integer.MAX_VALUE, adjusted));
+        preservePowerDeficit(factionId, previousMaximum);
+        requireData().setDirty();
     }
 
     public FactionDisplay factionDisplay(UUID factionId) {
@@ -170,6 +190,7 @@ public final class NativeFactionService {
         state.members.entrySet().removeIf(entry -> entry.getValue().factionId.equals(factionId));
         formerMembers.forEach(playerId -> settings(playerId).chatMode = FactionChatMode.GLOBAL);
         state.claims.entrySet().removeIf(entry -> entry.getValue().factionId().equals(factionId));
+        state.anchors.entrySet().removeIf(entry -> entry.getValue().factionId.equals(factionId));
         for (FactionRecord faction : state.factions.values()) {
             faction.relations.remove(factionId);
         }
@@ -299,9 +320,61 @@ public final class NativeFactionService {
         return List.copyOf(requireData().claims.values());
     }
 
+    public Collection<AnchorMapSnapshot> allAnchors() {
+        return requireData().anchors.values().stream()
+                .map(anchor -> new AnchorMapSnapshot(anchor.id, anchor.factionId, anchor.dimension,
+                        anchor.x, anchor.y, anchor.z, anchor.tier, anchor.allocatedPower,
+                        anchor.usablePowerTenths, anchor.priority, anchor.projectedRadius, anchor.projectedClaims,
+                        anchor.powerState, anchor.connectionState, anchor.vulnerabilityState,
+                        anchor.isolationStartTick))
+                .toList();
+    }
+
+    public AnchorMapSnapshot anchor(String id) {
+        AnchorRecord anchor = requireData().anchors.get(id);
+        return anchor == null ? null : new AnchorMapSnapshot(anchor.id, anchor.factionId, anchor.dimension,
+                anchor.x, anchor.y, anchor.z, anchor.tier, anchor.allocatedPower, anchor.usablePowerTenths,
+                anchor.priority, anchor.projectedRadius, anchor.projectedClaims, anchor.powerState,
+                anchor.connectionState, anchor.vulnerabilityState, anchor.isolationStartTick);
+    }
+
+    public void putAnchor(AnchorMapSnapshot anchor) {
+        requireFaction(anchor.factionId());
+        AnchorRecord existing = requireData().anchors.get(anchor.id());
+        if (existing != null && existing.factionId.equals(anchor.factionId())
+                && existing.dimension.equals(anchor.dimension()) && existing.x == anchor.x()
+                && existing.y == anchor.y() && existing.z == anchor.z() && existing.tier == anchor.tier()
+                && existing.allocatedPower == anchor.allocatedPower()
+                && existing.usablePowerTenths == anchor.usablePowerTenths() && existing.priority == anchor.priority()
+                && existing.projectedRadius == anchor.projectedRadius()
+                && existing.projectedClaims == anchor.projectedClaims()
+                && existing.powerState == anchor.powerState()
+                && existing.connectionState == anchor.connectionState()
+                && existing.vulnerabilityState == anchor.vulnerabilityState()
+                && existing.isolationStartTick == anchor.isolationStartTick()) {
+            return;
+        }
+        requireData().anchors.put(anchor.id(), new AnchorRecord(anchor.id(), anchor.factionId(),
+                anchor.dimension(), anchor.x(), anchor.y(), anchor.z(), anchor.tier(),
+                anchor.allocatedPower(), anchor.usablePowerTenths(), anchor.priority(), anchor.projectedRadius(),
+                anchor.projectedClaims(), anchor.powerState(), anchor.connectionState(),
+                anchor.vulnerabilityState(), anchor.isolationStartTick()));
+        requireData().setDirty();
+    }
+
+    public void removeAnchor(String id) {
+        if (requireData().anchors.remove(id) != null) requireData().setDirty();
+    }
+
     public void putClaim(TerritoryKey key, UUID factionId, TerritoryType type) {
         requireFaction(factionId);
         requireData().claims.put(key, new TerritoryClaim(key, factionId, type));
+        requireData().setDirty();
+    }
+
+    public void putProjectedClaim(TerritoryKey key, UUID factionId) {
+        requireFaction(factionId);
+        requireData().claims.put(key, new TerritoryClaim(key, factionId, TerritoryType.BORDER, true));
         requireData().setDirty();
     }
 

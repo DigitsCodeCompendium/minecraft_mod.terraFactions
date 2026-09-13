@@ -51,6 +51,21 @@ public final class TerritoryRules {
         return visited.size() == remaining.size();
     }
 
+    public static Set<TerritoryKey> connectedComponent(Collection<TerritoryKey> territory, TerritoryKey start) {
+        Set<TerritoryKey> remaining = territory instanceof Set<TerritoryKey> set
+                ? set : new HashSet<>(territory);
+        if (!remaining.contains(start)) return Set.of();
+        Set<TerritoryKey> visited = new HashSet<>();
+        ArrayDeque<TerritoryKey> queue = new ArrayDeque<>();
+        queue.add(start);
+        while (!queue.isEmpty()) {
+            TerritoryKey key = queue.removeFirst();
+            if (!remaining.contains(key) || !visited.add(key)) continue;
+            for (int[] direction : DIRECTIONS) queue.addLast(key.offset(direction[0], direction[1]));
+        }
+        return visited;
+    }
+
     /** A centered square extending the requested chunk radius in every cardinal direction. */
     public static Set<TerritoryKey> centeredSquare(TerritoryKey center, int radius) {
         Set<TerritoryKey> result = new LinkedHashSet<>();
@@ -61,5 +76,40 @@ public final class TerritoryRules {
             }
         }
         return result;
+    }
+
+    /** Finds the largest complete discrete circle whose claim count fits the supplied budget. */
+    public static CircularProjection largestCircularProjection(TerritoryKey center, int maxClaims) {
+        if (maxClaims <= 0) return new CircularProjection(0, Set.of());
+        int radius = Math.max(0, (int) Math.floor(Math.sqrt(maxClaims / Math.PI)));
+        Set<TerritoryKey> claims = circularProjection(center, radius);
+        while (claims.size() > maxClaims && radius > 0) {
+            claims = circularProjection(center, --radius);
+        }
+        while (true) {
+            Set<TerritoryKey> next = circularProjection(center, radius + 1);
+            if (next.size() > maxClaims) return new CircularProjection(radius, claims);
+            radius++;
+            claims = next;
+        }
+    }
+
+    public static Set<TerritoryKey> circularProjection(TerritoryKey center, int radius) {
+        Set<TerritoryKey> result = new LinkedHashSet<>();
+        long radiusSquared = (long) radius * radius;
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                if ((dx != 0 || dz != 0) && (long) dx * dx + (long) dz * dz <= radiusSquared) {
+                    result.add(center.offset(dx, dz));
+                }
+            }
+        }
+        return result;
+    }
+
+    public record CircularProjection(int radius, Set<TerritoryKey> claims) {
+        public CircularProjection {
+            claims = Set.copyOf(claims);
+        }
     }
 }

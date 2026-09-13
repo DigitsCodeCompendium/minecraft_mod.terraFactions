@@ -32,8 +32,6 @@ public final class TerraFactionsJourneyMapClientPlugin implements IClientPlugin 
         var claimMenu = event.getPopupMenu().createSubItemList("journeymap.terrafactions.factions");
         claimMenu.addMenuItem("journeymap.terrafactions.claim_core",
                 position -> requestAction(dimension, new ChunkPos(position), Action.CLAIM_CORE));
-        claimMenu.addMenuItem("journeymap.terrafactions.claim_border",
-                position -> requestAction(dimension, new ChunkPos(position), Action.CLAIM_BORDER));
         claimMenu.addMenuItem("journeymap.terrafactions.unclaim",
                 position -> requestAction(dimension, new ChunkPos(position), Action.UNCLAIM));
         claimMenu.addMenuItem("journeymap.terrafactions.liberate",

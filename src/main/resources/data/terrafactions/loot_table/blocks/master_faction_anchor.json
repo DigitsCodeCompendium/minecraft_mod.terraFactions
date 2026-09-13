@@ -1,0 +1,9 @@
+{
+  "type": "minecraft:block",
+  "pools": [{
+    "rolls": 1,
+    "entries": [{ "type": "minecraft:item", "name": "terrafactions:master_faction_anchor" }],
+    "conditions": [{ "condition": "minecraft:survives_explosion" }]
+  }],
+  "random_sequence": "terrafactions:blocks/master_faction_anchor"
+}

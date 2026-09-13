@@ -12,6 +12,7 @@ public record TerritoryRadarPayload(
         String faction,
         int relationColor,
         boolean vulnerable,
+        boolean isolated,
         boolean factionInfoVisible,
         int factionRankOrdinal,
         int power,
@@ -27,6 +28,7 @@ public record TerritoryRadarPayload(
                 buffer.writeUtf(payload.faction);
                 buffer.writeInt(payload.relationColor);
                 buffer.writeBoolean(payload.vulnerable);
+                buffer.writeBoolean(payload.isolated);
                 buffer.writeBoolean(payload.factionInfoVisible);
                 buffer.writeInt(payload.factionRankOrdinal);
                 buffer.writeInt(payload.power);
@@ -35,12 +37,12 @@ public record TerritoryRadarPayload(
                 buffer.writeBoolean(payload.coreVulnerable);
             },
             buffer -> new TerritoryRadarPayload(
-                    buffer.readUtf(), buffer.readUtf(), buffer.readInt(), buffer.readBoolean(),
+                    buffer.readUtf(), buffer.readUtf(), buffer.readInt(), buffer.readBoolean(), buffer.readBoolean(),
                     buffer.readBoolean(), buffer.readInt(), buffer.readInt(), buffer.readInt(),
                     buffer.readBoolean(), buffer.readBoolean()));
 
     public static TerritoryRadarPayload hidden() {
-        return new TerritoryRadarPayload("", "", 0, false, false, -1, 0, 0, false, false);
+        return new TerritoryRadarPayload("", "", 0, false, false, false, -1, 0, 0, false, false);
     }
 
     public boolean radarVisible() {

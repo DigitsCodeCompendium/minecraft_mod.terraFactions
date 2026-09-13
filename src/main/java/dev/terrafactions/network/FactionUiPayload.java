@@ -15,12 +15,13 @@ import java.util.List;
 /** Complete read-only snapshot used by the faction management screen. */
 public record FactionUiPayload(
         String name, String description, String tag, int color, int rankOrdinal,
-        int power, int maximumPower, int claimUsage, int deathLoss,
+        int power, int maximumPower, int claimUsage, int deathLoss, int specialPower,
         int basePower, int powerPerMember, int coreClaimCost, int borderClaimCost,
-        int capitalClaims, int coreClaims, int borderClaims, String capital,
+        int capitalClaims, int coreClaims, int borderClaims, int projectedBorderClaims,
+        int projectedClaimUsage, String capital,
         boolean coreVulnerable, boolean borderVulnerable, boolean radarEnabled, int chatModeOrdinal,
         List<MemberEntry> members, List<LossEntry> losses,
-        List<FactionEntry> factions) implements CustomPacketPayload {
+        List<FactionEntry> factions, List<AdminFactionEntry> adminFactions) implements CustomPacketPayload {
 
     public static final Type<FactionUiPayload> TYPE = new Type<>(
             ResourceLocation.fromNamespaceAndPath(TerraFactions.MOD_ID, "faction_ui"));
@@ -31,12 +32,13 @@ public record FactionUiPayload(
         members = List.copyOf(members);
         losses = List.copyOf(losses);
         factions = List.copyOf(factions);
+        adminFactions = List.copyOf(adminFactions);
     }
 
     public static FactionUiPayload empty() {
         return new FactionUiPayload("", "", "", 0xAAAAAA, -1,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "", false, false, true,
-                FactionChatMode.GLOBAL.ordinal(), List.of(), List.of(), List.of());
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "", false, false, true,
+                FactionChatMode.GLOBAL.ordinal(), List.of(), List.of(), List.of(), List.of());
     }
 
     public boolean hasFaction() {
@@ -66,6 +68,7 @@ public record FactionUiPayload(
         buffer.writeInt(value.maximumPower);
         buffer.writeInt(value.claimUsage);
         buffer.writeInt(value.deathLoss);
+        buffer.writeInt(value.specialPower);
         buffer.writeInt(value.basePower);
         buffer.writeInt(value.powerPerMember);
         buffer.writeInt(value.coreClaimCost);
@@ -73,6 +76,8 @@ public record FactionUiPayload(
         buffer.writeInt(value.capitalClaims);
         buffer.writeInt(value.coreClaims);
         buffer.writeInt(value.borderClaims);
+        buffer.writeInt(value.projectedBorderClaims);
+        buffer.writeInt(value.projectedClaimUsage);
         buffer.writeUtf(value.capital);
         buffer.writeBoolean(value.coreVulnerable);
         buffer.writeBoolean(value.borderVulnerable);
@@ -84,6 +89,8 @@ public record FactionUiPayload(
         value.losses.forEach(entry -> entry.write(buffer));
         buffer.writeVarInt(value.factions.size());
         value.factions.forEach(entry -> entry.write(buffer));
+        buffer.writeVarInt(value.adminFactions.size());
+        value.adminFactions.forEach(entry -> entry.write(buffer));
     }
 
     private static FactionUiPayload read(RegistryFriendlyByteBuf buffer) {
@@ -96,6 +103,7 @@ public record FactionUiPayload(
         int maximumPower = buffer.readInt();
         int claimUsage = buffer.readInt();
         int deathLoss = buffer.readInt();
+        int specialPower = buffer.readInt();
         int basePower = buffer.readInt();
         int powerPerMember = buffer.readInt();
         int coreClaimCost = buffer.readInt();
@@ -103,6 +111,8 @@ public record FactionUiPayload(
         int capitalClaims = buffer.readInt();
         int coreClaims = buffer.readInt();
         int borderClaims = buffer.readInt();
+        int projectedBorderClaims = buffer.readInt();
+        int projectedClaimUsage = buffer.readInt();
         String capital = buffer.readUtf();
         boolean coreVulnerable = buffer.readBoolean();
         boolean borderVulnerable = buffer.readBoolean();
@@ -111,10 +121,11 @@ public record FactionUiPayload(
         List<MemberEntry> members = readList(buffer, MemberEntry::read);
         List<LossEntry> losses = readList(buffer, LossEntry::read);
         List<FactionEntry> factions = readList(buffer, FactionEntry::read);
+        List<AdminFactionEntry> adminFactions = readList(buffer, AdminFactionEntry::read);
         return new FactionUiPayload(name, description, tag, color, rank, power, maximumPower,
-                claimUsage, deathLoss, basePower, powerPerMember, coreClaimCost, borderClaimCost,
-                capitalClaims, coreClaims, borderClaims, capital,
-                coreVulnerable, borderVulnerable, radarEnabled, chatMode, members, losses, factions);
+                claimUsage, deathLoss, specialPower, basePower, powerPerMember, coreClaimCost, borderClaimCost,
+                capitalClaims, coreClaims, borderClaims, projectedBorderClaims, projectedClaimUsage, capital,
+                coreVulnerable, borderVulnerable, radarEnabled, chatMode, members, losses, factions, adminFactions);
     }
 
     private static <T> List<T> readList(RegistryFriendlyByteBuf buffer, Reader<T> reader) {
@@ -196,6 +207,23 @@ public record FactionUiPayload(
             return relation() == FactionRelation.NEUTRAL
                     && incomingDeclaration() == FactionRelation.ALLIED
                     && outgoingDeclaration() != FactionRelation.ALLIED;
+        }
+    }
+
+    public record AdminFactionEntry(String name, String tag, int color, int power, int maximumPower,
+                                    int specialPower) {
+        void write(RegistryFriendlyByteBuf buffer) {
+            buffer.writeUtf(name);
+            buffer.writeUtf(tag);
+            buffer.writeInt(color);
+            buffer.writeInt(power);
+            buffer.writeInt(maximumPower);
+            buffer.writeInt(specialPower);
+        }
+
+        static AdminFactionEntry read(RegistryFriendlyByteBuf buffer) {
+            return new AdminFactionEntry(buffer.readUtf(), buffer.readUtf(4), buffer.readInt(),
+                    buffer.readInt(), buffer.readInt(), buffer.readInt());
         }
     }
 

@@ -33,10 +33,11 @@ public record FactionActionPayload(Action action, String primary, String seconda
     public enum Action {
         CREATE, JOIN, LEAVE, DISBAND,
         INVITE, KICK, SET_RANK,
-        CLAIM_CORE, CLAIM_BORDER, UNCLAIM, SET_CAPITAL,
+        CLAIM_CORE, UNCLAIM, SET_CAPITAL,
         DECLARE_RELATION,
         SET_NAME, SET_DESCRIPTION, SET_COLOR, SET_TAG,
         SET_RADAR, SET_CHAT, SET_OVERLAY,
-        IMPORT_PREVIEW, IMPORT_CONFIRM
+        IMPORT_PREVIEW, IMPORT_CONFIRM,
+        ADMIN_GIVE_POWER, ADMIN_REMOVE_POWER
     }
 }

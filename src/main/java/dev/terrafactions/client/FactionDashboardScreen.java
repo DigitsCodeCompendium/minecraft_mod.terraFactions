@@ -50,11 +50,13 @@ public final class FactionDashboardScreen extends Screen {
     private int panelHeight;
     private int scrollOffset;
     private int selectedFaction;
+    private int selectedAdminFaction;
     private TerraTextField memberField;
     private TerraTextField memberSearchField;
     private String memberSearch = "";
     private String selectedMember = "";
     private TerraTextField colorField;
+    private TerraTextField adminPowerField;
     private int colorPreviewX;
     private int colorPreviewY;
 
@@ -86,9 +88,12 @@ public final class FactionDashboardScreen extends Screen {
         tabs.add(Tab.RELATIONS);
         if (!state.hasFaction() || state.rank().isLeadership()) tabs.add(Tab.FACTION);
         tabs.add(Tab.SETTINGS);
+        if (isOperator()) tabs.add(Tab.ADMIN);
         visibleTabs = List.copyOf(tabs);
         if (!visibleTabs.contains(selectedTab)) selectedTab = Tab.OVERVIEW;
         selectedFaction = Math.clamp(selectedFaction, 0, Math.max(0, state.factions().size() - 1));
+        selectedAdminFaction = Math.clamp(selectedAdminFaction, 0,
+                Math.max(0, state.adminFactions().size() - 1));
     }
 
     private void populateWidgets() {
@@ -96,6 +101,7 @@ public final class FactionDashboardScreen extends Screen {
         memberField = null;
         memberSearchField = null;
         colorField = null;
+        adminPowerField = null;
         int x = panelX + PAD;
         int bottom = panelY + panelHeight - PAD - BUTTON_HEIGHT;
         switch (selectedTab) {
@@ -106,6 +112,7 @@ public final class FactionDashboardScreen extends Screen {
             case RELATIONS -> relationWidgets(x, bottom);
             case FACTION -> factionWidgets(x, bottom);
             case SETTINGS -> settingsWidgets(x, panelY + 42);
+            case ADMIN -> adminWidgets(x, bottom);
         }
         addButton(CommonComponents.GUI_DONE, panelX + panelWidth - 66, panelY + 4, 56, button -> onClose());
     }
@@ -158,13 +165,11 @@ public final class FactionDashboardScreen extends Screen {
 
     private void territoryWidgets(int x, int y) {
         int contentWidth = contentWidth();
-        int buttonWidth = Math.max(32, (contentWidth - GAP * 3) / 4);
+        int buttonWidth = Math.max(42, (contentWidth - GAP * 2) / 3);
         addButton(text("claim_core"), x, y, buttonWidth, button -> send(Action.CLAIM_CORE));
-        addButton(text("claim_border"), x + buttonWidth + GAP, y, buttonWidth,
-                button -> send(Action.CLAIM_BORDER));
-        addButton(text("unclaim"), x + (buttonWidth + GAP) * 2, y, buttonWidth,
+        addButton(text("unclaim"), x + buttonWidth + GAP, y, buttonWidth,
                 button -> send(Action.UNCLAIM));
-        addButton(text("set_capital"), x + (buttonWidth + GAP) * 3, y, buttonWidth,
+        addButton(text("set_capital"), x + (buttonWidth + GAP) * 2, y, buttonWidth,
                 button -> send(Action.SET_CAPITAL));
     }
 
@@ -248,6 +253,17 @@ public final class FactionDashboardScreen extends Screen {
         }
     }
 
+    private void adminWidgets(int x, int y) {
+        if (!isOperator() || state.adminFactions().isEmpty()) return;
+        int amountWidth = Math.min(110, Math.max(72, contentWidth() / 3));
+        int buttonWidth = Math.max(54, (contentWidth() - amountWidth - GAP * 2) / 2);
+        adminPowerField = field(x, y, amountWidth, "power_amount", 10, "10");
+        addButton(text("give_power"), x + amountWidth + GAP, y, buttonWidth,
+                button -> sendAdminPower(Action.ADMIN_GIVE_POWER));
+        addButton(text("remove_power"), x + amountWidth + GAP + buttonWidth + GAP, y, buttonWidth,
+                button -> sendAdminPower(Action.ADMIN_REMOVE_POWER));
+    }
+
     @Override
     public void tick() {
         super.tick();
@@ -272,6 +288,7 @@ public final class FactionDashboardScreen extends Screen {
             case RELATIONS -> renderRelations(graphics);
             case FACTION -> renderFaction(graphics);
             case SETTINGS -> renderSettings(graphics);
+            case ADMIN -> renderAdmin(graphics);
         }
         super.render(graphics, mouseX, mouseY, partialTick);
     }
@@ -308,15 +325,24 @@ public final class FactionDashboardScreen extends Screen {
         TerraGui.recessedPanel(graphics, x, boxY, contentWidth(), 72, THEME);
         Component sources = text("power_sources", state.basePower(), state.members().size(),
                 state.powerPerMember(), state.maximumPower());
+        Component special = state.specialPower() > 0
+                ? text("power_special_addition", state.specialPower())
+                : state.specialPower() < 0
+                ? text("power_special_subtraction", Math.abs((long) state.specialPower()))
+                : text("power_special_none");
         Component claims = text("power_claims", state.capitalClaims() + state.coreClaims(),
-                state.coreClaimCost(), state.borderClaims(), state.borderClaimCost(), state.claimUsage());
-        drawFit(graphics, sources, x + 6, boxY + 6, contentWidth() - 12, THEME.text());
-        drawFit(graphics, claims, x + 6, boxY + 21, contentWidth() - 12, THEME.negative());
-        graphics.drawString(font, text("power_deaths", state.deathLoss()), x + 6, boxY + 36,
+                state.coreClaimCost(), state.borderClaims() - state.projectedBorderClaims(),
+                state.borderClaimCost(), state.projectedClaimUsage(), state.claimUsage());
+        drawFit(graphics, sources, x + 6, boxY + 5, contentWidth() - 12, THEME.text());
+        drawFit(graphics, special, x + 6, boxY + 18, contentWidth() - 12,
+                state.specialPower() > 0 ? THEME.positive()
+                        : state.specialPower() < 0 ? THEME.negative() : THEME.mutedText());
+        drawFit(graphics, claims, x + 6, boxY + 31, contentWidth() - 12, THEME.negative());
+        graphics.drawString(font, text("power_deaths", state.deathLoss()), x + 6, boxY + 44,
                 state.deathLoss() > 0 ? THEME.negative() : THEME.mutedText(), false);
         Component remaining = text("power_remaining", state.power(), state.maximumPower());
         int remainingX = Math.max(x + 6, x + contentWidth() - font.width(remaining) - 6);
-        graphics.drawString(font, remaining, remainingX, boxY + 53,
+        graphics.drawString(font, remaining, remainingX, boxY + 58,
                 state.power() >= 0 ? THEME.positive() : THEME.negative(), false);
 
         int barY = boxY + 78;
@@ -445,6 +471,37 @@ public final class FactionDashboardScreen extends Screen {
         wrapped(graphics, text("settings_help"), x, panelY + 142, panelWidth - PAD * 2);
     }
 
+    private void renderAdmin(GuiGraphics graphics) {
+        int x = panelX + PAD;
+        int y = panelY + 31;
+        section(graphics, text("admin_powers"), x, y);
+        if (state.adminFactions().isEmpty()) {
+            wrapped(graphics, text("no_factions"), x, y + 20, contentWidth());
+            return;
+        }
+        FactionUiPayload.AdminFactionEntry selected = state.adminFactions().get(selectedAdminFaction);
+        Component summary = text("admin_power_summary", selected.power(), selected.maximumPower(),
+                signedPower(selected.specialPower()));
+        drawFit(graphics, summary, x, y + 18, contentWidth(), THEME.mutedText());
+        renderScroll(graphics, x, y + 34, contentWidth(), panelHeight - 110,
+                state.adminFactions().size(), (entryY, index) -> {
+                    FactionUiPayload.AdminFactionEntry faction = state.adminFactions().get(index);
+                    if (index == selectedAdminFaction) graphics.fill(x + 2, entryY + 2,
+                            panelX + panelWidth - PAD - 15, entryY + ROW_HEIGHT, 0x40FFFFFF);
+                    TerraGui.colorPip(graphics, x + 8, entryY + 4, 0xFF000000 | faction.color(), THEME);
+                    drawFit(graphics, Component.literal("[" + faction.tag() + "] " + faction.name()),
+                            x + 23, entryY + 5, Math.max(50, contentWidth() - 190),
+                            0xFF000000 | faction.color());
+                    Component power = Component.literal(faction.power() + "/" + faction.maximumPower());
+                    graphics.drawString(font, power, x + contentWidth() - 125, entryY + 5,
+                            faction.power() >= 0 ? THEME.text() : THEME.negative(), false);
+                    Component special = Component.literal(signedPower(faction.specialPower()));
+                    graphics.drawString(font, special, x + contentWidth() - font.width(special) - 16,
+                            entryY + 5, faction.specialPower() > 0 ? THEME.positive()
+                                    : faction.specialPower() < 0 ? THEME.negative() : THEME.mutedText(), false);
+                });
+    }
+
     private void renderFactionDirectory(GuiGraphics graphics, int x, int y, int width, int height) {
         int shown = Math.min(state.factions().size(), Math.max(0, (height - 8) / ROW_HEIGHT));
         TerraGui.recessedPanel(graphics, x, y, width, height, THEME);
@@ -501,6 +558,14 @@ public final class FactionDashboardScreen extends Screen {
             if (index >= 0 && index < members.size()) {
                 selectedMember = members.get(index).name();
                 if (memberField != null) memberField.setValue(selectedMember);
+                return true;
+            }
+        }
+        if (button == 0 && selectedTab == Tab.ADMIN && scrollLayout != null
+                && scrollLayout.viewport().contains(mouseX, mouseY)) {
+            int index = (int) ((mouseY - scrollLayout.viewport().y() - 2 + scrollOffset) / ROW_HEIGHT);
+            if (index >= 0 && index < state.adminFactions().size()) {
+                selectedAdminFaction = index;
                 return true;
             }
         }
@@ -574,6 +639,25 @@ public final class FactionDashboardScreen extends Screen {
         if (minecraft.player != null && minecraft.player.connection != null) {
             PacketDistributor.sendToServer(payload);
         }
+    }
+
+    private void sendAdminPower(Action action) {
+        if (adminPowerField == null || state.adminFactions().isEmpty()) return;
+        String amount = adminPowerField.getValue().trim();
+        try {
+            if (Integer.parseInt(amount) <= 0) {
+                setFocused(adminPowerField);
+                return;
+            }
+        } catch (NumberFormatException exception) {
+            setFocused(adminPowerField);
+            return;
+        }
+        send(action, state.adminFactions().get(selectedAdminFaction).name(), amount);
+    }
+
+    private static String signedPower(int power) {
+        return power > 0 ? "+" + power : Integer.toString(power);
     }
 
     private void setOverlayEnabled(boolean enabled) {
@@ -689,7 +773,7 @@ public final class FactionDashboardScreen extends Screen {
 
     private enum Tab {
         OVERVIEW("overview"), MEMBERS("members"), LOSSES("losses"), TERRITORY("territory"),
-        RELATIONS("relations"), FACTION("faction"), SETTINGS("settings");
+        RELATIONS("relations"), FACTION("faction"), SETTINGS("settings"), ADMIN("admin_powers");
         private final String key;
         Tab(String key) { this.key = key; }
         Component label() { return text(key); }

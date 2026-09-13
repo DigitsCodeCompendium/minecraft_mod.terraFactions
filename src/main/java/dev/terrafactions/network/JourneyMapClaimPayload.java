@@ -28,7 +28,6 @@ public record JourneyMapClaimPayload(ResourceLocation dimension, int chunkX, int
 
     public enum Action {
         CLAIM_CORE,
-        CLAIM_BORDER,
         UNCLAIM,
         LIBERATE
     }

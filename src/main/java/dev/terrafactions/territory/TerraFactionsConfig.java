@@ -9,6 +9,9 @@ public final class TerraFactionsConfig {
     public static final ModConfigSpec.DoubleValue BORDER_VULNERABILITY_PERCENT;
     public static final ModConfigSpec.BooleanValue REQUIRE_SIDE_CONNECTIVITY;
     public static final ModConfigSpec.IntValue JOURNEYMAP_CLAIM_RADIUS;
+    public static final ModConfigSpec.IntValue MAX_ANCHOR_POWER;
+    public static final ModConfigSpec.IntValue ANCHOR_ISOLATION_GRACE_TICKS;
+    public static final ModConfigSpec.IntValue ANCHOR_RECALCULATION_INTERVAL_TICKS;
     public static final ModConfigSpec.IntValue BASE_POWER;
     public static final ModConfigSpec.IntValue POWER_PER_MEMBER;
     public static final ModConfigSpec.IntValue DEATH_POWER_PENALTY;
@@ -40,6 +43,13 @@ public final class TerraFactionsConfig {
                 .define("requireSideConnectivity", true);
         JOURNEYMAP_CLAIM_RADIUS = builder.comment("Maximum chunk radius in which players can claim territory from JourneyMap.")
                 .defineInRange("journeyMapClaimRadius", 3, 0, Integer.MAX_VALUE);
+        MAX_ANCHOR_POWER = builder.comment("Maximum power that can be allocated to one faction anchor.")
+                .defineInRange("maximumAnchorPower", 1000, 0, Integer.MAX_VALUE);
+        ANCHOR_ISOLATION_GRACE_TICKS = builder.comment("Ticks an isolated anchor remains protected before becoming vulnerable.")
+                .defineInRange("anchorIsolationGraceTicks", 24000, 0, Integer.MAX_VALUE);
+        ANCHOR_RECALCULATION_INTERVAL_TICKS = builder.comment(
+                        "Ticks between periodic anchor border reconciliations. Each reconciliation rebuilds projected borders from anchor circles.")
+                .defineInRange("anchorRecalculationIntervalTicks", 200, 1, Integer.MAX_VALUE);
         builder.pop();
         SPEC = builder.build();
     }

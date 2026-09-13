@@ -1,5 +1,9 @@
 package dev.terrafactions.factions;
 
+import dev.terrafactions.anchor.AnchorTier;
+import dev.terrafactions.anchor.AnchorPowerState;
+import dev.terrafactions.anchor.AnchorConnectionState;
+import dev.terrafactions.anchor.AnchorVulnerabilityState;
 import dev.terrafactions.territory.TerritoryClaim;
 import dev.terrafactions.territory.TerritoryKey;
 import dev.terrafactions.territory.TerritoryType;
@@ -23,6 +27,7 @@ public final class NativeFactionData extends SavedData {
     final Map<UUID, FactionRecord> factions = new HashMap<>();
     final Map<UUID, MemberRecord> members = new HashMap<>();
     final Map<TerritoryKey, TerritoryClaim> claims = new HashMap<>();
+    final Map<String, AnchorRecord> anchors = new HashMap<>();
     final Map<UUID, PlayerSettings> settings = new HashMap<>();
 
     public NativeFactionData() {
@@ -32,6 +37,7 @@ public final class NativeFactionData extends SavedData {
         loadFactions(root.getList("factions", Tag.TAG_COMPOUND));
         loadMembers(root.getList("members", Tag.TAG_COMPOUND));
         loadClaims(root.getList("claims", Tag.TAG_COMPOUND));
+        loadAnchors(root.getList("anchors", Tag.TAG_COMPOUND));
         loadSettings(root.getList("settings", Tag.TAG_COMPOUND));
         audit();
     }
@@ -50,6 +56,7 @@ public final class NativeFactionData extends SavedData {
             faction.tag = entry.getString("tag");
             faction.color = entry.getInt("color");
             faction.power = entry.getInt("power");
+            faction.specialPower = entry.getInt("special_power");
             ListTag deathLosses = entry.getList("death_losses", Tag.TAG_COMPOUND);
             for (int j = 0; j < deathLosses.size(); j++) {
                 CompoundTag loss = deathLosses.getCompound(j);
@@ -94,7 +101,8 @@ public final class NativeFactionData extends SavedData {
             TerritoryKey key = readKey(entry);
             UUID factionId = entry.getUUID("faction");
             TerritoryType type = enumValue(TerritoryType.class, entry.getString("type"), TerritoryType.BORDER);
-            claims.put(key, new TerritoryClaim(key, factionId, type));
+            boolean projected = entry.getBoolean("projected");
+            claims.put(key, new TerritoryClaim(key, factionId, type, projected));
         }
     }
 
@@ -107,9 +115,29 @@ public final class NativeFactionData extends SavedData {
         }
     }
 
+    private void loadAnchors(ListTag entries) {
+        for (int i = 0; i < entries.size(); i++) {
+            CompoundTag entry = entries.getCompound(i);
+            if (!entry.hasUUID("faction")) continue;
+            String id = entry.getString("id");
+            anchors.put(id, new AnchorRecord(id, entry.getUUID("faction"), entry.getString("dimension"),
+                    entry.getInt("x"), entry.getInt("y"), entry.getInt("z"),
+                    enumValue(AnchorTier.class, entry.getString("tier"), AnchorTier.BASIC),
+                    entry.contains("allocated_power") ? entry.getInt("allocated_power")
+                            : entry.getInt("dedicated_power"),
+                    entry.getInt("usable_power_tenths"), entry.getInt("priority"),
+                    entry.getInt("projected_radius"), entry.getInt("projected_claims"),
+                    enumValue(AnchorPowerState.class, entry.getString("power_state"), AnchorPowerState.UNPOWERED),
+                    enumValue(AnchorConnectionState.class, entry.getString("connection_state"), AnchorConnectionState.ISOLATED),
+                    enumValue(AnchorVulnerabilityState.class, entry.getString("vulnerability_state"), AnchorVulnerabilityState.GRACE_PERIOD),
+                    entry.getLong("isolation_start_tick")));
+        }
+    }
+
     void audit() {
         members.entrySet().removeIf(entry -> !factions.containsKey(entry.getValue().factionId));
         claims.entrySet().removeIf(entry -> !factions.containsKey(entry.getValue().factionId()));
+        anchors.entrySet().removeIf(entry -> !factions.containsKey(entry.getValue().factionId));
         settings.forEach((playerId, playerSettings) -> {
             if (!members.containsKey(playerId) && playerSettings.chatMode != FactionChatMode.GLOBAL) {
                 playerSettings.chatMode = FactionChatMode.GLOBAL;
@@ -151,6 +179,7 @@ public final class NativeFactionData extends SavedData {
         root.put("factions", saveFactions());
         root.put("members", saveMembers());
         root.put("claims", saveClaims());
+        root.put("anchors", saveAnchors());
         root.put("settings", saveSettings());
         return root;
     }
@@ -165,6 +194,7 @@ public final class NativeFactionData extends SavedData {
             entry.putString("tag", faction.tag);
             entry.putInt("color", faction.color);
             entry.putInt("power", faction.power);
+            entry.putInt("special_power", faction.specialPower);
             ListTag deathLosses = new ListTag();
             for (Map.Entry<UUID, Integer> loss : faction.deathLosses.entrySet()) {
                 if (loss.getValue() <= 0) continue;
@@ -213,6 +243,7 @@ public final class NativeFactionData extends SavedData {
             CompoundTag entry = writeKey(claim.key());
             entry.putUUID("faction", claim.factionId());
             entry.putString("type", claim.type().name());
+            entry.putBoolean("projected", claim.projected());
             entries.add(entry);
         }
         return entries;
@@ -225,6 +256,31 @@ public final class NativeFactionData extends SavedData {
             entry.putUUID("player", value.getKey());
             entry.putBoolean("radar", value.getValue().radar);
             entry.putString("chat", value.getValue().chatMode.name());
+            entries.add(entry);
+        }
+        return entries;
+    }
+
+    private ListTag saveAnchors() {
+        ListTag entries = new ListTag();
+        for (AnchorRecord anchor : anchors.values()) {
+            CompoundTag entry = new CompoundTag();
+            entry.putString("id", anchor.id);
+            entry.putUUID("faction", anchor.factionId);
+            entry.putString("dimension", anchor.dimension);
+            entry.putInt("x", anchor.x);
+            entry.putInt("y", anchor.y);
+            entry.putInt("z", anchor.z);
+            entry.putString("tier", anchor.tier.name());
+            entry.putInt("allocated_power", anchor.allocatedPower);
+            entry.putInt("usable_power_tenths", anchor.usablePowerTenths);
+            entry.putInt("priority", anchor.priority);
+            entry.putInt("projected_radius", anchor.projectedRadius);
+            entry.putInt("projected_claims", anchor.projectedClaims);
+            entry.putString("power_state", anchor.powerState.name());
+            entry.putString("connection_state", anchor.connectionState.name());
+            entry.putString("vulnerability_state", anchor.vulnerabilityState.name());
+            entry.putLong("isolation_start_tick", anchor.isolationStartTick);
             entries.add(entry);
         }
         return entries;
@@ -257,6 +313,7 @@ public final class NativeFactionData extends SavedData {
         String tag;
         int color = 0xAAAAAA;
         int power;
+        int specialPower;
         final Map<UUID, Integer> deathLosses = new HashMap<>();
         TerritoryKey capital;
         final Set<UUID> invites = new HashSet<>();
@@ -290,6 +347,47 @@ public final class NativeFactionData extends SavedData {
         PlayerSettings(boolean radar, FactionChatMode chatMode) {
             this.radar = radar;
             this.chatMode = chatMode;
+        }
+    }
+
+    static final class AnchorRecord {
+        final String id;
+        final UUID factionId;
+        final String dimension;
+        final int x;
+        final int y;
+        final int z;
+        final AnchorTier tier;
+        final int allocatedPower;
+        final int usablePowerTenths;
+        final int priority;
+        final int projectedRadius;
+        final int projectedClaims;
+        final AnchorPowerState powerState;
+        final AnchorConnectionState connectionState;
+        final AnchorVulnerabilityState vulnerabilityState;
+        final long isolationStartTick;
+
+        AnchorRecord(String id, UUID factionId, String dimension, int x, int y, int z, AnchorTier tier,
+                     int allocatedPower, int usablePowerTenths, int priority, int projectedRadius, int projectedClaims,
+                     AnchorPowerState powerState, AnchorConnectionState connectionState,
+                     AnchorVulnerabilityState vulnerabilityState, long isolationStartTick) {
+            this.id = id;
+            this.factionId = factionId;
+            this.dimension = dimension;
+            this.x = x;
+            this.y = y;
+            this.z = z;
+            this.tier = tier;
+            this.allocatedPower = allocatedPower;
+            this.usablePowerTenths = usablePowerTenths;
+            this.priority = priority;
+            this.projectedRadius = projectedRadius;
+            this.projectedClaims = projectedClaims;
+            this.powerState = powerState;
+            this.connectionState = connectionState;
+            this.vulnerabilityState = vulnerabilityState;
+            this.isolationStartTick = isolationStartTick;
         }
     }
 

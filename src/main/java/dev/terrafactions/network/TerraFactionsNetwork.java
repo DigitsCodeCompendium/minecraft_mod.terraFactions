@@ -10,11 +10,14 @@ public final class TerraFactionsNetwork {
     }
 
     public static void registerPayloads(RegisterPayloadHandlersEvent event) {
-        var registrar = event.registrar("9");
+        var registrar = event.registrar("13");
         registrar.playToClient(TerritoryRadarPayload.TYPE, TerritoryRadarPayload.STREAM_CODEC,
                 (payload, context) -> TerritoryRadarHud.accept(payload));
         registrar.playToClient(FactionUiPayload.TYPE, FactionUiPayload.STREAM_CODEC,
                 (payload, context) -> dev.terrafactions.client.FactionDashboardScreen.accept(payload));
+        registrar.playToClient(AnchorStatePayload.TYPE, AnchorStatePayload.STREAM_CODEC,
+                (payload, context) -> context.enqueueWork(
+                        () -> dev.terrafactions.client.FactionAnchorScreen.accept(payload)));
         registrar.playToServer(FactionActionPayload.TYPE, FactionActionPayload.STREAM_CODEC,
                 (payload, context) -> context.enqueueWork(() -> {
                     if (context.player() instanceof ServerPlayer player) {
@@ -25,6 +28,18 @@ public final class TerraFactionsNetwork {
                 (payload, context) -> context.enqueueWork(() -> {
                     if (context.player() instanceof ServerPlayer player) {
                         TerraFactions.territories().handleJourneyMapClaim(player, payload);
+                    }
+                }));
+        registrar.playToServer(AnchorPowerPayload.TYPE, AnchorPowerPayload.STREAM_CODEC,
+                (payload, context) -> context.enqueueWork(() -> {
+                    if (context.player() instanceof ServerPlayer player) {
+                        TerraFactions.territories().setAnchorPower(player, payload);
+                    }
+                }));
+        registrar.playToServer(AnchorStateRequestPayload.TYPE, AnchorStateRequestPayload.STREAM_CODEC,
+                (payload, context) -> context.enqueueWork(() -> {
+                    if (context.player() instanceof ServerPlayer player) {
+                        TerraFactions.territories().requestAnchorState(player, payload);
                     }
                 }));
     }

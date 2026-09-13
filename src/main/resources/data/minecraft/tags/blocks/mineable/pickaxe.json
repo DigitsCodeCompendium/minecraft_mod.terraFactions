@@ -1,0 +1,8 @@
+{
+  "replace": false,
+  "values": [
+    "terrafactions:faction_anchor",
+    "terrafactions:advanced_faction_anchor",
+    "terrafactions:master_faction_anchor"
+  ]
+}

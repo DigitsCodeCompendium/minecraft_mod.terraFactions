@@ -1,0 +1,5 @@
+{
+  "variants": {
+    "": { "model": "terrafactions:block/advanced_faction_anchor" }
+  }
+}

@@ -53,9 +53,44 @@ class TerritoryRulesTest {
     }
 
     @Test
+    void circularProjectionUsesLargestCompleteRadiusAndExcludesAnchorChunk() {
+        TerritoryRules.CircularProjection projection = TerritoryRules.largestCircularProjection(key(0, 0), 12);
+
+        assertEquals(2, projection.radius());
+        assertEquals(12, projection.claims().size());
+        assertFalse(projection.claims().contains(key(0, 0)));
+        assertTrue(projection.claims().containsAll(Set.of(key(-1, 0), key(1, 0), key(0, -1), key(0, 1))));
+        assertTrue(TerritoryRules.isConnected(projection.claims()));
+    }
+
+    @Test
+    void overlappingCirclesHaveAUnionSmallerThanTheirChargedFootprints() {
+        Set<TerritoryKey> first = TerritoryRules.circularProjection(key(0, 0), 2);
+        Set<TerritoryKey> second = TerritoryRules.circularProjection(key(1, 0), 2);
+        Set<TerritoryKey> union = new java.util.HashSet<>(first);
+        union.addAll(second);
+
+        assertEquals(12, first.size());
+        assertEquals(12, second.size());
+        assertTrue(union.size() < first.size() + second.size());
+    }
+
+    @Test
     void connectivityCheckRejectsSeparatedGroups() {
         assertTrue(TerritoryRules.isConnected(Set.of(key(0, 0), key(1, 0), key(1, 1))));
         assertFalse(TerritoryRules.isConnected(Set.of(key(0, 0), key(2, 0))));
+    }
+
+    @Test
+    void redundantTerritoryPathSurvivesUntilEveryRouteIsCut() {
+        Set<TerritoryKey> territory = new java.util.HashSet<>(Set.of(
+                key(0, 0), key(1, 0), key(2, 0),
+                key(0, 1), key(1, 1), key(2, 1)));
+
+        territory.remove(key(1, 0));
+        assertTrue(TerritoryRules.connectedComponent(territory, key(0, 0)).contains(key(2, 0)));
+        territory.remove(key(1, 1));
+        assertFalse(TerritoryRules.connectedComponent(territory, key(0, 0)).contains(key(2, 0)));
     }
 
     private static TerritoryKey key(int x, int z) {

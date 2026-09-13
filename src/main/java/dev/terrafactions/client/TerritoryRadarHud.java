@@ -21,6 +21,7 @@ public final class TerritoryRadarHud {
     private static final int MIN_CONTENT_WIDTH = 96;
     private static final int VULNERABLE_RED = 0xFFFF5555;
     private static final int VULNERABLE_YELLOW = 0xFFFFFF55;
+    private static final int ISOLATED_AMBER = 0xFFFFAA00;
     private static TerritoryRadarPayload state = TerritoryRadarPayload.hidden();
 
     private TerritoryRadarHud() {
@@ -68,7 +69,8 @@ public final class TerritoryRadarHud {
                     TerraFactionsClientConfig.RADAR_HUD.opacity());
             int lineY = PADDING;
             int textX = PADDING + ACCENT_WIDTH + 2;
-            int accent = state.vulnerable() ? vulnerabilityColor(minecraft) : 0xFF000000 | state.relationColor();
+            int accent = state.vulnerable() ? vulnerabilityColor(minecraft)
+                    : state.isolated() ? ISOLATED_AMBER : 0xFF000000 | state.relationColor();
             graphics.fill(PADDING, lineY, PADDING + ACCENT_WIDTH, lineY + LINE_HEIGHT - 1, accent);
             graphics.drawString(minecraft.font, label, textX, lineY,
                     0xFF000000 | state.relationColor(), false);
@@ -85,9 +87,10 @@ public final class TerritoryRadarHud {
     }
 
     private static String radarLabel() {
-        return state.faction().isBlank() || "Wilderness".equals(state.territory())
+        String label = state.faction().isBlank() || "Wilderness".equals(state.territory())
                 ? state.territory()
                 : state.faction() + " - " + state.territory();
+        return state.isolated() ? label + " [ISOLATED]" : label;
     }
 
     private static int statusWidth(Minecraft minecraft) {

@@ -156,11 +156,30 @@ public final class FactionCommandService {
                         ? previewLegacyImport(source) : fail(source, "Operator permission is required.");
                 case IMPORT_CONFIRM -> player.hasPermissions(3)
                         ? confirmLegacyImport(source) : fail(source, "Operator permission is required.");
+                case ADMIN_GIVE_POWER -> adjustSpecialPower(player, source, payload, true);
+                case ADMIN_REMOVE_POWER -> adjustSpecialPower(player, source, payload, false);
                 default -> fail(source, "That action is not a faction-management action.");
             };
         } catch (IllegalArgumentException exception) {
             return fail(source, "The dashboard request contained an invalid option.");
         }
+    }
+
+    private int adjustSpecialPower(ServerPlayer player, CommandSourceStack source,
+                                   FactionActionPayload payload, boolean give) {
+        if (!player.hasPermissions(3)) return fail(source, "Operator permission is required.");
+        UUID factionId = factions.factionByName(payload.primary().trim());
+        if (factionId == null) return fail(source, "That faction does not exist.");
+        int amount;
+        try {
+            amount = Integer.parseInt(payload.secondary().trim());
+        } catch (NumberFormatException exception) {
+            return fail(source, "Power adjustment must be a whole number.");
+        }
+        if (amount <= 0) return fail(source, "Power adjustment must be greater than zero.");
+        factions.adjustSpecialPower(factionId, give ? amount : -amount);
+        return success(source, (give ? "Gave " : "Removed ") + amount + " special power "
+                + (give ? "to " : "from ") + factions.factionName(factionId) + ".");
     }
 
     private static ServerPlayer onlinePlayer(CommandSourceStack source, String name) {
@@ -409,6 +428,9 @@ public final class FactionCommandService {
                 + " | Available power: " + power.current() + "/" + power.maximum()
                 + " | Claims: " + snapshot.claims().size() + " (" + power.claimUsage() + " power)"
                 + " | Death loss: " + power.deathLoss()), false);
+        if (power.specialPower() != 0) source.sendSuccess(() -> Component.literal(
+                "Special " + (power.specialPower() > 0 ? "addition: +" : "subtraction: -")
+                        + Math.abs((long) power.specialPower())), false);
         showVulnerability(source, factionId, "Core", TerritoryType.CORE);
         showVulnerability(source, factionId, "Border", TerritoryType.BORDER);
         showDeathLosses(source, power);
@@ -438,6 +460,9 @@ public final class FactionCommandService {
         source.sendSuccess(() -> Component.literal("Faction power: " + power.current() + "/" + power.maximum()
                 + " available | " + power.claimUsage() + " used by claims | " + power.deathLoss()
                 + " lost to deaths."), false);
+        if (power.specialPower() != 0) source.sendSuccess(() -> Component.literal(
+                "Special " + (power.specialPower() > 0 ? "addition: +" : "subtraction: -")
+                        + Math.abs((long) power.specialPower())), false);
         showDeathLosses(source, power);
         return 1;
     }

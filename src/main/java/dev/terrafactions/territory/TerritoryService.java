@@ -4,6 +4,12 @@ import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.exceptions.SimpleCommandExceptionType;
 import dev.terrafactions.TerraFactions;
+import dev.terrafactions.anchor.FactionAnchorBlockEntity;
+import dev.terrafactions.anchor.AnchorMapSnapshot;
+import dev.terrafactions.anchor.AnchorPowerState;
+import dev.terrafactions.anchor.AnchorConnectionState;
+import dev.terrafactions.anchor.AnchorVulnerabilityState;
+import dev.terrafactions.anchor.AnchorNetworkRules;
 import dev.terrafactions.factions.FactionIdentity;
 import dev.terrafactions.factions.FactionCommandService;
 import dev.terrafactions.factions.FactionPower;
@@ -18,6 +24,9 @@ import dev.terrafactions.network.TerritoryRadarPayload;
 import dev.terrafactions.network.FactionUiPayload;
 import dev.terrafactions.network.FactionActionPayload;
 import dev.terrafactions.network.JourneyMapClaimPayload;
+import dev.terrafactions.network.AnchorPowerPayload;
+import dev.terrafactions.network.AnchorStatePayload;
+import dev.terrafactions.network.AnchorStateRequestPayload;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
@@ -56,6 +65,9 @@ public final class TerritoryService {
             factions, displays::refreshNow, this::isVulnerable);
     private final Map<UUID, TerritoryRadarPayload> radarStates = new HashMap<>();
     private final Map<UUID, FactionUiPayload> factionUiStates = new HashMap<>();
+    private final Set<UUID> dirtyNetworks = new HashSet<>();
+    private final Map<UUID, Long> knownPowerBudgets = new HashMap<>();
+    private final Map<UUID, Long> corePowerUsageCache = new HashMap<>();
     private MinecraftServer server;
 
     public void register() {
@@ -73,11 +85,15 @@ public final class TerritoryService {
         server = event.getServer();
         factions.initialize(server);
         reconcileCapitals();
+        factions.allFactions().forEach(faction -> dirtyNetworks.add(faction.id()));
     }
 
     private void onServerStopped(ServerStoppedEvent event) {
         radarStates.clear();
         factionUiStates.clear();
+        dirtyNetworks.clear();
+        knownPowerBudgets.clear();
+        corePowerUsageCache.clear();
         factions.stop();
         server = null;
     }
@@ -89,13 +105,19 @@ public final class TerritoryService {
         int tick = event.getServer().getTickCount();
         if (tick % TerraFactionsConfig.POWER_REGEN_INTERVAL_TICKS.get() == 0) {
             factions.regeneratePower();
+            factions.allFactions().forEach(faction -> dirtyNetworks.add(faction.id()));
         }
+        if (tick % TerraFactionsConfig.ANCHOR_RECALCULATION_INTERVAL_TICKS.get() == 0) {
+            factions.allFactions().forEach(faction -> dirtyNetworks.add(faction.id()));
+        }
+        processDirtyNetworks(event.getServer());
         if (tick % 20 == 0) {
             radarStates.keySet().removeIf(playerId ->
                     event.getServer().getPlayerList().getPlayer(playerId) == null);
             factionUiStates.keySet().removeIf(playerId ->
                     event.getServer().getPlayerList().getPlayer(playerId) == null);
             reconcileCapitals();
+            detectPowerAndIsolationChanges(event.getServer());
         }
     }
 
@@ -116,6 +138,7 @@ public final class TerritoryService {
         FactionIdentity identity = factions.factionForPlayer(victim.getUUID());
         if (identity != null) {
             factions.recordDeath(identity.id(), victim.getUUID(), TerraFactionsConfig.DEATH_POWER_PENALTY.get());
+            dirtyNetworks.add(identity.id());
         }
     }
 
@@ -148,17 +171,11 @@ public final class TerritoryService {
                                 .executes(context -> claim(context.getSource(), TerritoryType.CORE))
                                 .then(Commands.argument("radius", IntegerArgumentType.integer(1, 7))
                                         .executes(context -> bulkClaim(context.getSource(), TerritoryType.CORE,
-                                                IntegerArgumentType.getInteger(context, "radius")))))
-                        .then(Commands.literal("border")
-                                .executes(context -> claim(context.getSource(), TerritoryType.BORDER))
-                                .then(Commands.argument("radius", IntegerArgumentType.integer(1, 7))
-                                        .executes(context -> bulkClaim(context.getSource(), TerritoryType.BORDER,
                                                 IntegerArgumentType.getInteger(context, "radius"))))))
                 .then(Commands.literal("unclaim").executes(context -> unclaim(context.getSource())))
                 .then(Commands.literal("liberate").executes(context -> liberate(context.getSource())))
                 .then(Commands.literal("convert")
-                        .then(Commands.literal("core").executes(context -> claim(context.getSource(), TerritoryType.CORE)))
-                        .then(Commands.literal("border").executes(context -> claim(context.getSource(), TerritoryType.BORDER))))
+                        .then(Commands.literal("core").executes(context -> claim(context.getSource(), TerritoryType.CORE))))
                 .then(Commands.literal("capital")
                         .then(Commands.literal("set").executes(context -> setCapital(context.getSource()))))
                 .then(buildOverlayCommands())
@@ -170,8 +187,7 @@ public final class TerritoryService {
                 .then(Commands.literal("unclaim").executes(context -> unclaim(context.getSource())))
                 .then(Commands.literal("liberate").executes(context -> liberate(context.getSource())))
                 .then(Commands.literal("convert")
-                        .then(Commands.literal("core").executes(context -> claim(context.getSource(), TerritoryType.CORE)))
-                        .then(Commands.literal("border").executes(context -> claim(context.getSource(), TerritoryType.BORDER))))
+                        .then(Commands.literal("core").executes(context -> claim(context.getSource(), TerritoryType.CORE))))
                 .then(Commands.literal("capital")
                         .then(Commands.literal("set").executes(context -> setCapital(context.getSource()))))
                 .then(buildOverlayCommands()));
@@ -187,16 +203,10 @@ public final class TerritoryService {
                         .then(Commands.argument("radius", IntegerArgumentType.integer(1, 7))
                                 .executes(context -> bulkClaim(context.getSource(), TerritoryType.CORE,
                                         IntegerArgumentType.getInteger(context, "radius")))))
-                .then(Commands.literal("border")
-                        .executes(context -> claim(context.getSource(), TerritoryType.BORDER))
-                        .then(Commands.argument("radius", IntegerArgumentType.integer(1, 7))
-                                .executes(context -> bulkClaim(context.getSource(), TerritoryType.BORDER,
-                                        IntegerArgumentType.getInteger(context, "radius")))))
                 .then(Commands.literal("unclaim").executes(context -> unclaim(context.getSource())))
                 .then(Commands.literal("liberate").executes(context -> liberate(context.getSource())))
                 .then(Commands.literal("convert")
-                        .then(Commands.literal("core").executes(context -> claim(context.getSource(), TerritoryType.CORE)))
-                        .then(Commands.literal("border").executes(context -> claim(context.getSource(), TerritoryType.BORDER))))
+                        .then(Commands.literal("core").executes(context -> claim(context.getSource(), TerritoryType.CORE))))
                 .then(Commands.literal("capital")
                         .then(Commands.literal("set").executes(context -> setCapital(context.getSource()))))
                 .then(buildOverlayCommands());
@@ -212,13 +222,295 @@ public final class TerritoryService {
         return factions;
     }
 
+    public boolean placeAnchor(ServerPlayer player, FactionAnchorBlockEntity anchor) {
+        FactionIdentity identity = factions.factionForPlayer(player.getUUID());
+        if (identity == null || !identity.rank().canBuild()) {
+            player.sendSystemMessage(Component.literal("You must be a building member of a faction to place an anchor."));
+            return false;
+        }
+        TerritoryKey key = anchorKey(anchor);
+        TerritoryClaim claim = claimAt(key);
+        if (claim == null || !claim.factionId().equals(identity.id())) {
+            player.sendSystemMessage(Component.literal("Faction anchors must be placed inside your faction's territory."));
+            return false;
+        }
+        anchor.assign(identity.id());
+        configureAnchorProjection(anchor, 0);
+        return true;
+    }
+
+    public void openAnchor(ServerPlayer player, FactionAnchorBlockEntity anchor) {
+        if (!canConfigureAnchor(player, anchor)) return;
+        loadAnchor(anchor);
+        PacketDistributor.sendToPlayer(player, anchorState(anchor));
+    }
+
+    public void loadAnchor(FactionAnchorBlockEntity anchor) {
+        if (!factions.isReady() || anchor.factionId() == null) return;
+        if (factions.anchor(anchorId(anchor)) == null) {
+            configureAnchorProjection(anchor, anchor.allocatedPower());
+        }
+    }
+
+    public void setAnchorPower(ServerPlayer player, AnchorPowerPayload payload) {
+        if (!(player.level().getBlockEntity(payload.pos()) instanceof FactionAnchorBlockEntity anchor)
+                || !canConfigureAnchor(player, anchor)) {
+            return;
+        }
+        int maximum = maximumAnchorPower(anchor.factionId());
+        if (payload.power() < 0 || payload.power() > maximum) {
+            player.sendSystemMessage(Component.literal("Dedicated power must be between 0 and " + maximum + "."));
+        } else {
+            configureAnchorProjection(anchor, payload.power());
+            reconcileAnchorBorders(anchor.factionId());
+            recalculateFactionNetwork(anchor.factionId(), server.overworld().getGameTime());
+            dirtyNetworks.remove(anchor.factionId());
+        }
+        PacketDistributor.sendToPlayer(player, anchorState(anchor));
+    }
+
+    public void requestAnchorState(ServerPlayer player, AnchorStateRequestPayload payload) {
+        if (player.level().getBlockEntity(payload.pos()) instanceof FactionAnchorBlockEntity anchor
+                && canConfigureAnchor(player, anchor)) {
+            PacketDistributor.sendToPlayer(player, anchorState(anchor));
+        }
+    }
+
+    public void removeAnchor(FactionAnchorBlockEntity anchor) {
+        UUID owner = anchor.factionId();
+        if (owner == null || !factions.isReady()) return;
+        String id = anchorId(anchor);
+        anchor.updateProjection(anchor.allocatedPower());
+        factions.removeAnchor(id);
+        dirtyNetworks.add(owner);
+        ensureCapital(owner);
+    }
+
+    private boolean canConfigureAnchor(ServerPlayer player, FactionAnchorBlockEntity anchor) {
+        if (anchor.getLevel() != player.level()
+                || player.distanceToSqr(anchor.getBlockPos().getX() + 0.5D,
+                anchor.getBlockPos().getY() + 0.5D, anchor.getBlockPos().getZ() + 0.5D) > 64.0D) {
+            return false;
+        }
+        FactionIdentity identity = factions.factionForPlayer(player.getUUID());
+        if (identity == null || anchor.factionId() == null || !anchor.factionId().equals(identity.id())
+                || !identity.rank().canBuild()) {
+            player.sendSystemMessage(Component.literal("You cannot configure this faction anchor."));
+            return false;
+        }
+        return true;
+    }
+
+    private boolean configureAnchorProjection(FactionAnchorBlockEntity anchor, int allocatedPower) {
+        UUID owner = anchor.factionId();
+        if (owner == null) return false;
+        String id = anchorId(anchor);
+        int costTenths = anchor.tier().powerTenthsPerClaim();
+        TerritoryKey anchorChunk = anchorKey(anchor);
+        int maxClaims = (int) Math.min(Integer.MAX_VALUE, allocatedPower * 10L / costTenths);
+        TerritoryRules.CircularProjection projection = TerritoryRules.largestCircularProjection(anchorChunk, maxClaims);
+        Set<TerritoryKey> desired = projection.claims();
+        anchor.updateProjection(allocatedPower);
+        AnchorMapSnapshot old = factions.anchor(id);
+        long now = server == null ? 0L : server.overworld().getGameTime();
+        factions.putAnchor(new AnchorMapSnapshot(id, owner,
+                anchor.getLevel().dimension().location().toString(), anchor.getBlockPos().getX(),
+                anchor.getBlockPos().getY(), anchor.getBlockPos().getZ(), anchor.tier(), allocatedPower,
+                old == null ? 0 : old.usablePowerTenths(), old == null ? 0 : old.priority(), projection.radius(),
+                desired.size(), old == null ? AnchorPowerState.UNPOWERED : old.powerState(),
+                old == null ? AnchorConnectionState.ISOLATED : old.connectionState(),
+                old == null ? AnchorVulnerabilityState.GRACE_PERIOD : old.vulnerabilityState(),
+                old == null ? now : old.isolationStartTick()));
+        dirtyNetworks.add(owner);
+        return true;
+    }
+
+    private static String anchorId(FactionAnchorBlockEntity anchor) {
+        return anchor.getLevel().dimension().location() + "/" + anchor.getBlockPos().asLong();
+    }
+
+    private int maximumAnchorPower(UUID owner) {
+        FactionPower power = factions.power(owner);
+        return power == null ? 0 : Math.min(power.maximum(), TerraFactionsConfig.MAX_ANCHOR_POWER.get());
+    }
+
+    private AnchorStatePayload anchorState(FactionAnchorBlockEntity anchor) {
+        String factionName = factions.factionName(anchor.factionId());
+        AnchorMapSnapshot state = factions.anchor(anchorId(anchor));
+        if (state == null) {
+            configureAnchorProjection(anchor, anchor.allocatedPower());
+            state = factions.anchor(anchorId(anchor));
+        }
+        return new AnchorStatePayload(anchor.getBlockPos(), factionName == null ? "Unknown faction" : factionName,
+                anchor.tier().displayName(), anchor.tier().powerTenthsPerClaim(), state.allocatedPower(),
+                state.usablePowerTenths(), maximumAnchorPower(anchor.factionId()), state.projectedClaims(),
+                state.projectedRadius(), state.powerState(), state.connectionState(), state.vulnerabilityState(),
+                isolationSecondsRemaining(state));
+    }
+
+    private static TerritoryKey anchorKey(FactionAnchorBlockEntity anchor) {
+        ChunkPos chunk = new ChunkPos(anchor.getBlockPos());
+        return TerritoryKey.of(anchor.getLevel().dimension().location(), chunk.x, chunk.z);
+    }
+
+    private static TerritoryKey anchorKey(AnchorMapSnapshot anchor) {
+        return new TerritoryKey(anchor.dimension(), Math.floorDiv(anchor.x(), 16), Math.floorDiv(anchor.z(), 16));
+    }
+
+    private void processDirtyNetworks(MinecraftServer minecraftServer) {
+        if (dirtyNetworks.isEmpty()) return;
+        Set<UUID> pending = new HashSet<>(dirtyNetworks);
+        dirtyNetworks.removeAll(pending);
+        long now = minecraftServer.overworld().getGameTime();
+        for (UUID factionId : pending) {
+            reconcileAnchorBorders(factionId);
+            recalculateFactionNetwork(factionId, now);
+        }
+    }
+
+    private void reconcileAnchorBorders(UUID factionId) {
+        List<AnchorMapSnapshot> anchors = factions.allAnchors().stream()
+                .filter(anchor -> anchor.factionId().equals(factionId)).toList();
+        Map<String, Set<TerritoryKey>> desiredByDimension = new HashMap<>();
+        for (AnchorMapSnapshot anchor : anchors) {
+            TerritoryRules.CircularProjection projection = projectionFor(anchor);
+            desiredByDimension.computeIfAbsent(anchor.dimension(), ignored -> new HashSet<>())
+                    .addAll(projection.claims());
+            if (anchor.projectedRadius() != projection.radius()
+                    || anchor.projectedClaims() != projection.claims().size()) {
+                factions.putAnchor(new AnchorMapSnapshot(anchor.id(), anchor.factionId(), anchor.dimension(),
+                        anchor.x(), anchor.y(), anchor.z(), anchor.tier(), anchor.allocatedPower(),
+                        anchor.usablePowerTenths(), anchor.priority(), projection.radius(), projection.claims().size(),
+                        anchor.powerState(), anchor.connectionState(), anchor.vulnerabilityState(),
+                        anchor.isolationStartTick()));
+            }
+        }
+
+        for (TerritoryClaim claim : allTerritory().stream()
+                .filter(value -> value.factionId().equals(factionId) && value.projected()).toList()) {
+            if (!desiredByDimension.getOrDefault(claim.key().dimension(), Set.of()).contains(claim.key())) {
+                factions.removeClaim(claim.key());
+            }
+        }
+        for (Set<TerritoryKey> desired : desiredByDimension.values()) {
+            for (TerritoryKey key : desired) {
+                if (claimAt(key) == null) {
+                    // Physical border claims belong to the faction-wide union, not to an individual anchor.
+                    factions.putProjectedClaim(key, factionId);
+                }
+            }
+        }
+    }
+
+    private void detectPowerAndIsolationChanges(MinecraftServer minecraftServer) {
+        Set<UUID> existing = new HashSet<>();
+        Map<UUID, Long> coreUsage = new HashMap<>();
+        for (TerritoryClaim claim : allTerritory()) {
+            if (!claim.projected()) {
+                coreUsage.merge(claim.factionId(), claim.powerCostTenths(), Long::sum);
+            }
+        }
+        for (FactionSnapshot faction : factions.allFactions()) {
+            existing.add(faction.id());
+            FactionPower power = factions.power(faction.id());
+            long grossPower = power == null ? 0L : (long) power.current() + power.claimUsage();
+            long signature = grossPower * 31L + coreUsage.getOrDefault(faction.id(), 0L);
+            if (!Long.valueOf(signature).equals(knownPowerBudgets.put(faction.id(), signature))) {
+                dirtyNetworks.add(faction.id());
+            }
+        }
+        knownPowerBudgets.keySet().removeIf(id -> !existing.contains(id));
+        corePowerUsageCache.keySet().removeIf(id -> !existing.contains(id));
+        corePowerUsageCache.putAll(coreUsage);
+
+        long now = minecraftServer.overworld().getGameTime();
+        long grace = TerraFactionsConfig.ANCHOR_ISOLATION_GRACE_TICKS.get();
+        for (AnchorMapSnapshot anchor : factions.allAnchors()) {
+            if (anchor.vulnerabilityState() == AnchorVulnerabilityState.GRACE_PERIOD
+                    && now - anchor.isolationStartTick() >= grace) {
+                dirtyNetworks.add(anchor.factionId());
+            }
+        }
+    }
+
+    private void recalculateFactionNetwork(UUID factionId, long now) {
+        if (factions.snapshot(factionId) == null) return;
+        List<AnchorMapSnapshot> anchors = factions.allAnchors().stream()
+                .filter(anchor -> anchor.factionId().equals(factionId))
+                .sorted(Comparator.comparingInt(AnchorMapSnapshot::priority).reversed()
+                        .thenComparing(AnchorMapSnapshot::id))
+                .toList();
+        Map<TerritoryKey, TerritoryClaim> claims = new HashMap<>();
+        for (TerritoryClaim claim : allTerritory()) {
+            if (claim.factionId().equals(factionId)) claims.put(claim.key(), claim);
+        }
+
+        Set<String> connectedAnchors = connectedAnchors(factionId, claims, anchors);
+
+        FactionPower factionPower = factions.power(factionId);
+        long grossPowerTenths = factionPower == null ? 0L
+                : ((long) factionPower.current() + factionPower.claimUsage()) * 10L;
+        long remainingAnchorPower = Math.max(0L, grossPowerTenths - corePowerUsageTenths(factionId));
+        long grace = TerraFactionsConfig.ANCHOR_ISOLATION_GRACE_TICKS.get();
+        for (AnchorMapSnapshot anchor : anchors) {
+            long required = AnchorNetworkRules.requiredPowerTenths(anchor.tier(), anchor.projectedClaims());
+            int usable = (int) Math.min(Integer.MAX_VALUE, Math.min(required, remainingAnchorPower));
+            remainingAnchorPower = Math.max(0L, remainingAnchorPower - usable);
+            AnchorPowerState powerState = AnchorNetworkRules.powerState(required, usable);
+            boolean connected = connectedAnchors.contains(anchor.id());
+            long isolationStart = connected ? 0L
+                    : anchor.connectionState() == AnchorConnectionState.ISOLATED
+                    && anchor.isolationStartTick() > 0 ? anchor.isolationStartTick() : now;
+            AnchorConnectionState connectionState = connected
+                    ? AnchorConnectionState.CONNECTED : AnchorConnectionState.ISOLATED;
+            AnchorVulnerabilityState vulnerabilityState = AnchorNetworkRules.vulnerabilityState(
+                    powerState, connected, anchor.projectedClaims() > 0,
+                    isolationStart, now, grace);
+            factions.putAnchor(new AnchorMapSnapshot(anchor.id(), anchor.factionId(), anchor.dimension(),
+                    anchor.x(), anchor.y(), anchor.z(), anchor.tier(), anchor.allocatedPower(), usable,
+                    anchor.priority(), anchor.projectedRadius(), anchor.projectedClaims(), powerState,
+                    connectionState, vulnerabilityState, isolationStart));
+        }
+    }
+
+    private static TerritoryRules.CircularProjection projectionFor(AnchorMapSnapshot anchor) {
+        int maxClaims = (int) Math.min(Integer.MAX_VALUE,
+                anchor.allocatedPower() * 10L / anchor.tier().powerTenthsPerClaim());
+        return TerritoryRules.largestCircularProjection(anchorKey(anchor), maxClaims);
+    }
+
+    private Set<String> connectedAnchors(UUID factionId, Map<TerritoryKey, TerritoryClaim> claims,
+                                         List<AnchorMapSnapshot> anchors) {
+        TerritoryKey capital = factions.capital(factionId);
+        if (capital == null || !claims.containsKey(capital)) return Set.of();
+        Set<TerritoryKey> reachable = TerritoryRules.connectedComponent(claims.keySet(), capital);
+        Set<String> capitalAnchors = anchors.stream()
+                .filter(anchor -> anchorKey(anchor).equals(capital))
+                .map(AnchorMapSnapshot::id).collect(java.util.stream.Collectors.toSet());
+        Set<String> territoriallyReachable = anchors.stream()
+                .filter(anchor -> reachable.contains(anchorKey(anchor)))
+                .map(AnchorMapSnapshot::id).collect(java.util.stream.Collectors.toSet());
+        return AnchorNetworkRules.connectedToCapital(anchors, capitalAnchors, territoriallyReachable);
+    }
+
+    private long corePowerUsageTenths(UUID factionId) {
+        return corePowerUsageCache.computeIfAbsent(factionId, id -> allTerritory().stream()
+                .filter(claim -> claim.factionId().equals(factionId) && !claim.projected())
+                .mapToLong(TerritoryClaim::powerCostTenths).sum());
+    }
+
+    private long isolationSecondsRemaining(AnchorMapSnapshot anchor) {
+        if (anchor.connectionState() != AnchorConnectionState.ISOLATED || server == null) return 0L;
+        long elapsed = server.overworld().getGameTime() - anchor.isolationStartTick();
+        return Math.max(0L, TerraFactionsConfig.ANCHOR_ISOLATION_GRACE_TICKS.get() - elapsed) / 20L;
+    }
+
     /** Handles native dashboard requests directly on the server thread. */
     public void handleUiAction(ServerPlayer player, FactionActionPayload payload) {
         CommandSourceStack source = player.createCommandSourceStack().withSuppressedOutput();
         try {
             switch (payload.action()) {
                 case CLAIM_CORE -> claim(source, TerritoryType.CORE);
-                case CLAIM_BORDER -> claim(source, TerritoryType.BORDER);
                 case UNCLAIM -> unclaim(source);
                 case SET_CAPITAL -> setCapital(source);
                 case SET_OVERLAY -> setOverlay(source, payload.enabled());
@@ -227,6 +519,7 @@ public final class TerritoryService {
         } catch (com.mojang.brigadier.exceptions.CommandSyntaxException exception) {
             source.sendFailure(Component.literal(exception.getMessage()));
         }
+        factions.allFactions().forEach(faction -> dirtyNetworks.add(faction.id()));
         syncClientState(player, true);
     }
 
@@ -250,7 +543,6 @@ public final class TerritoryService {
             Actor actor = actor(source);
             switch (payload.action()) {
                 case CLAIM_CORE -> claim(source, actor, TerritoryType.CORE, target);
-                case CLAIM_BORDER -> claim(source, actor, TerritoryType.BORDER, target);
                 case UNCLAIM -> unclaim(source, actor, target);
                 case LIBERATE -> liberate(source, actor, target);
             }
@@ -299,13 +591,22 @@ public final class TerritoryService {
                         factions.declaredRelation(identity == null ? null : identity.id(), faction.id()).ordinal(),
                         factions.declaredRelation(faction.id(), identity == null ? null : identity.id()).ordinal()))
                 .toList();
+        List<FactionUiPayload.AdminFactionEntry> adminFactionEntries = player.hasPermissions(3)
+                ? factions.allFactions().stream().map(faction -> {
+                    FactionPower factionPower = factions.power(faction.id());
+                    return new FactionUiPayload.AdminFactionEntry(faction.name(), factions.tag(faction.id()),
+                            faction.color(), factionPower.current(), factionPower.maximum(),
+                            factionPower.specialPower());
+                }).sorted(Comparator.comparing(FactionUiPayload.AdminFactionEntry::name,
+                        String.CASE_INSENSITIVE_ORDER)).toList()
+                : List.of();
         if (identity == null) {
             return new FactionUiPayload("", "", "", 0xAAAAAA, -1,
-                    0, 0, 0, 0, TerraFactionsConfig.BASE_POWER.get(),
+                    0, 0, 0, 0, 0, TerraFactionsConfig.BASE_POWER.get(),
                     TerraFactionsConfig.POWER_PER_MEMBER.get(), TerraFactionsConfig.CORE_CLAIM_COST.get(),
-                    TerraFactionsConfig.BORDER_CLAIM_COST.get(), 0, 0, 0, "", false, false,
+                    TerraFactionsConfig.BORDER_CLAIM_COST.get(), 0, 0, 0, 0, 0, "", false, false,
                     factions.radarEnabled(player.getUUID()), factions.chatMode(player.getUUID()).ordinal(),
-                    List.of(), List.of(), factionEntries);
+                    List.of(), List.of(), factionEntries, adminFactionEntries);
         }
 
         FactionSnapshot faction = factions.snapshot(identity.id());
@@ -334,17 +635,25 @@ public final class TerritoryService {
         int capitalClaims = (int) faction.claims().stream().filter(claim -> claim.type() == TerritoryType.CAPITAL).count();
         int coreClaims = (int) faction.claims().stream().filter(claim -> claim.type() == TerritoryType.CORE).count();
         int borderClaims = (int) faction.claims().stream().filter(claim -> claim.type() == TerritoryType.BORDER).count();
+        int projectedBorderClaims = (int) allTerritory().stream()
+                .filter(claim -> claim.factionId().equals(identity.id()) && claim.type() == TerritoryType.BORDER
+                        && claim.projected())
+                .count();
+        int manualClaimUsage = (capitalClaims + coreClaims) * TerraFactionsConfig.CORE_CLAIM_COST.get()
+                + (borderClaims - projectedBorderClaims) * TerraFactionsConfig.BORDER_CLAIM_COST.get();
+        int projectedClaimUsage = Math.max(0, power.claimUsage() - manualClaimUsage);
         String capital = faction.capital() == null ? "" : faction.capital().x() + ", " + faction.capital().z()
                 + " (" + faction.capital().dimension() + ")";
         return new FactionUiPayload(faction.name(), faction.description(), factions.tag(identity.id()),
                 faction.color(), identity.rank().ordinal(), power.current(), power.maximum(), power.claimUsage(),
-                power.deathLoss(), TerraFactionsConfig.BASE_POWER.get(), TerraFactionsConfig.POWER_PER_MEMBER.get(),
+                power.deathLoss(), power.specialPower(), TerraFactionsConfig.BASE_POWER.get(),
+                TerraFactionsConfig.POWER_PER_MEMBER.get(),
                 TerraFactionsConfig.CORE_CLAIM_COST.get(), TerraFactionsConfig.BORDER_CLAIM_COST.get(),
-                capitalClaims, coreClaims, borderClaims, capital,
+                capitalClaims, coreClaims, borderClaims, projectedBorderClaims, projectedClaimUsage, capital,
                 isVulnerable(identity.id(), TerritoryType.CORE),
                 isVulnerable(identity.id(), TerritoryType.BORDER),
                 factions.radarEnabled(player.getUUID()), factions.chatMode(player.getUUID()).ordinal(),
-                members, losses, factionEntries);
+                members, losses, factionEntries, adminFactionEntries);
     }
 
     private static String playerName(MinecraftServer server, UUID playerId) {
@@ -361,6 +670,7 @@ public final class TerritoryService {
         String territoryFaction = "";
         int relationColor = 0xAAAAAA;
         boolean vulnerable = false;
+        boolean isolated = false;
         FactionPower ownPower = viewer == null ? null : factions.power(viewer.id());
         boolean borderVulnerable = viewer != null && isVulnerable(viewer.id(), TerritoryType.BORDER);
         boolean coreVulnerable = viewer != null && isVulnerable(viewer.id(), TerritoryType.CORE);
@@ -378,11 +688,13 @@ public final class TerritoryService {
                 };
                 territoryFaction = owner == null ? "Unknown Faction" : owner.name();
                 relationColor = relationColor(viewer, claim.factionId());
-                vulnerable = isVulnerable(claim);
+                AnchorVulnerabilityState state = vulnerabilityState(claim);
+                vulnerable = state == AnchorVulnerabilityState.VULNERABLE;
+                isolated = state == AnchorVulnerabilityState.GRACE_PERIOD;
             }
         }
 
-        return new TerritoryRadarPayload(territoryName, territoryFaction, relationColor, vulnerable,
+        return new TerritoryRadarPayload(territoryName, territoryFaction, relationColor, vulnerable, isolated,
                 ownPower != null,
                 viewer == null ? -1 : viewer.rank().ordinal(),
                 ownPower == null ? 0 : ownPower.current(),
@@ -413,6 +725,9 @@ public final class TerritoryService {
     }
 
     private int claim(CommandSourceStack source, Actor actor, TerritoryType type, TerritoryKey key) {
+        if (type == TerritoryType.BORDER) {
+            return fail(source, "Border territory can only be projected by faction anchors.");
+        }
         TerritoryClaim existing = claimAt(key);
         if (existing != null && !existing.factionId().equals(actor.factionId())) {
             return captureEnemyClaim(source, actor, type, key);
@@ -451,6 +766,9 @@ public final class TerritoryService {
         if (existing == null || !existing.factionId().equals(actor.factionId())) {
             return fail(source, "Your faction does not own this chunk.");
         }
+        if (existing.projected()) {
+            return fail(source, "Anchor-projected borders are managed through their anchor allocation.");
+        }
         if (existing.type() == TerritoryType.CAPITAL) {
             return fail(source, "Move your capital before unclaiming this chunk.");
         }
@@ -465,13 +783,21 @@ public final class TerritoryService {
 
     private int unclaimAll(CommandSourceStack source) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
         Actor actor = actor(source);
-        int removed = factions.removeAllClaims(actor.factionId());
+        List<TerritoryClaim> removable = allTerritory().stream()
+                .filter(claim -> claim.factionId().equals(actor.factionId()) && !claim.projected())
+                .toList();
+        removable.forEach(this::remove);
+        int removed = removable.size();
         factions.clearCapital(actor.factionId());
-        return success(source, "Removed all " + removed + " claims.");
+        dirtyNetworks.add(actor.factionId());
+        return success(source, "Removed all " + removed + " core claims. Anchor borders were preserved.");
     }
 
     private int bulkClaim(CommandSourceStack source, TerritoryType requestedType, int radius)
             throws com.mojang.brigadier.exceptions.CommandSyntaxException {
+        if (requestedType == TerritoryType.BORDER) {
+            return fail(source, "Border territory can only be projected by faction anchors.");
+        }
         Actor actor = actor(source);
         TerritoryKey center = currentChunk(actor.player());
         Set<TerritoryKey> square = TerritoryRules.centeredSquare(center, radius);
@@ -499,7 +825,7 @@ public final class TerritoryService {
         }
         FactionPower power = factions.power(actor.factionId());
         long grossPower = power == null ? Long.MIN_VALUE : (long) power.current() + power.claimUsage();
-        if (power == null || requiredPower(actor.factionId()) + addedCost > grossPower) {
+        if (power == null || corePowerUsageTenths(actor.factionId()) + addedCost * 10L > grossPower * 10L) {
             return fail(source, "Your faction does not have enough available power for " + additions.size() + " claims.");
         }
 
@@ -614,43 +940,77 @@ public final class TerritoryService {
     }
 
     public boolean isVulnerable(TerritoryClaim claim) {
-        return isVulnerable(claim.factionId(), claim.type());
+        return vulnerabilityState(claim) == AnchorVulnerabilityState.VULNERABLE;
+    }
+
+    public AnchorVulnerabilityState vulnerabilityState(TerritoryClaim claim) {
+        if (claim.projected()) {
+            List<AnchorMapSnapshot> covering = factions.allAnchors().stream()
+                    .filter(anchor -> anchor.factionId().equals(claim.factionId()))
+                    .filter(anchor -> anchor.dimension().equals(claim.key().dimension()))
+                    .filter(anchor -> covers(anchor, claim.key()))
+                    .toList();
+            if (covering.stream().anyMatch(anchor ->
+                    anchor.vulnerabilityState() == AnchorVulnerabilityState.PROTECTED)) {
+                return AnchorVulnerabilityState.PROTECTED;
+            }
+            if (covering.stream().anyMatch(anchor ->
+                    anchor.vulnerabilityState() == AnchorVulnerabilityState.GRACE_PERIOD)) {
+                return AnchorVulnerabilityState.GRACE_PERIOD;
+            }
+            if (!covering.isEmpty()) return AnchorVulnerabilityState.VULNERABLE;
+        }
+        return isVulnerable(claim.factionId(), claim.type())
+                ? AnchorVulnerabilityState.VULNERABLE : AnchorVulnerabilityState.PROTECTED;
+    }
+
+    private static boolean covers(AnchorMapSnapshot anchor, TerritoryKey key) {
+        TerritoryKey center = anchorKey(anchor);
+        long dx = (long) center.x() - key.x();
+        long dz = (long) center.z() - key.z();
+        return dx * dx + dz * dz <= (long) anchor.projectedRadius() * anchor.projectedRadius();
     }
 
     public boolean isVulnerable(UUID factionId, TerritoryType type) {
+        if (type == TerritoryType.BORDER) {
+            List<AnchorMapSnapshot> anchors = factions.allAnchors().stream()
+                    .filter(anchor -> anchor.factionId().equals(factionId)).toList();
+            if (!anchors.isEmpty()) {
+                return anchors.stream().anyMatch(anchor ->
+                        anchor.vulnerabilityState() == AnchorVulnerabilityState.VULNERABLE);
+            }
+        }
         FactionPower power = factions.power(factionId);
-        if (power == null || power.current() <= 0) {
+        if (power == null) {
             return true;
         }
-        if (type != TerritoryType.BORDER || power.maximum() <= 0) {
+        long grossPowerTenths = ((long) power.current() + power.claimUsage()) * 10L;
+        if (type != TerritoryType.BORDER) {
+            return grossPowerTenths - corePowerUsageTenths(factionId) <= 0;
+        }
+        if (power.current() <= 0) {
+            return true;
+        }
+        if (power.maximum() <= 0) {
             return false;
         }
         return (double) power.current() / power.maximum() <= TerraFactionsConfig.BORDER_VULNERABILITY_PERCENT.get();
     }
 
     private boolean hasCapacity(UUID factionId, TerritoryType addedType, TerritoryClaim replacedOwnClaim) {
-        long required = requiredPower(factionId);
-        if (replacedOwnClaim != null) {
-            required -= replacedOwnClaim.type().cost();
+        long required = corePowerUsageTenths(factionId);
+        if (replacedOwnClaim != null && !replacedOwnClaim.projected()) {
+            required -= replacedOwnClaim.powerCostTenths();
         }
-        required += addedType.cost();
+        required += addedType.cost() * 10L;
         FactionPower power = factions.power(factionId);
         long grossPower = power == null ? Long.MIN_VALUE : (long) power.current() + power.claimUsage();
-        return power != null && required <= grossPower;
-    }
-
-    private long requiredPower(UUID factionId) {
-        long total = 0;
-        for (TerritoryClaim claim : allTerritory()) {
-            if (claim.factionId().equals(factionId)) {
-                total += claim.type().cost();
-            }
-        }
-        return total;
+        return power != null && required <= grossPower * 10L;
     }
 
     private boolean hasClaims(UUID factionId) {
-        return allTerritory().stream().anyMatch(claim -> claim.factionId().equals(factionId));
+        return allTerritory().stream()
+                .anyMatch(claim -> claim.factionId().equals(factionId) && !claim.projected());
     }
 
     private Set<TerritoryKey> territory(UUID factionId, String dimension) {
@@ -676,7 +1036,7 @@ public final class TerritoryService {
     private void ensureCapital(UUID factionId) {
         TerritoryKey current = factions.capital(factionId);
         List<TerritoryClaim> owned = allTerritory().stream()
-                .filter(claim -> claim.factionId().equals(factionId))
+                .filter(claim -> claim.factionId().equals(factionId) && !claim.projected())
                 .sorted(Comparator.comparing((TerritoryClaim claim) -> claim.key().dimension())
                         .thenComparingInt(claim -> claim.key().x())
                         .thenComparingInt(claim -> claim.key().z()))
@@ -712,7 +1072,11 @@ public final class TerritoryService {
         } catch (RuntimeException exception) {
             if (oldClaim != null) {
                 try {
-                    add(oldClaim.factionId(), oldClaim.type(), oldClaim.key());
+                    if (oldClaim.projected()) {
+                        factions.putProjectedClaim(oldClaim.key(), oldClaim.factionId());
+                    } else {
+                        factions.putClaim(oldClaim.key(), oldClaim.factionId(), oldClaim.type());
+                    }
                 } catch (RuntimeException rollbackException) {
                     exception.addSuppressed(rollbackException);
                     TerraFactions.LOGGER.error("Could not roll back failed territory transfer at {} {}, {}",
@@ -725,10 +1089,14 @@ public final class TerritoryService {
 
     private void add(UUID owner, TerritoryType type, TerritoryKey key) {
         factions.putClaim(key, owner, type);
+        corePowerUsageCache.remove(owner);
+        dirtyNetworks.add(owner);
     }
 
     private void remove(TerritoryClaim claim) {
         factions.removeClaim(claim.key());
+        if (!claim.projected()) corePowerUsageCache.remove(claim.factionId());
+        dirtyNetworks.add(claim.factionId());
     }
 
     private Actor actor(CommandSourceStack source) throws com.mojang.brigadier.exceptions.CommandSyntaxException {
